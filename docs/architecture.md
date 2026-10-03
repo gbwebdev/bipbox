@@ -363,6 +363,17 @@ disabled.
   Janus transcodes into the mix.
 - The server drives Janus over its HTTP API on localhost. Janus's own admin
   surface is never exposed.
+- **Two independent RTP port ranges**, verified against Janus 1.4.2 during the
+  phase 0b spike and worth stating because it is a silent failure mode:
+  plain-RTP participants are bound from `rtp_port_range` in
+  **`janus.plugin.audiobridge.jcfg`** (default 10000+), while
+  `media.rtp_port_range` in `janus.jcfg` governs only ICE/WebRTC media. Both
+  must be set, and both opened — on the tunnel for the devices, and on the
+  public interface for browsers in `plain_rtp` mode. Getting this wrong
+  produces audio that is silent with no error in any log.
+- The `ip` Janus reports in a join response is **its own view of itself** (a
+  container or tunnel address), not necessarily one the device can reach. The
+  device always sends to the address it was given in its configuration.
 - Mixing is server-side, so each box receives exactly **one** stream regardless
   of how many participants exist, and **nobody is ever sent their own audio** —
   "except loopback" is free.

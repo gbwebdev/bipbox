@@ -1,0 +1,25 @@
+name: bipbox-voip-spike
+
+services:
+  janus:
+    build: .
+    restart: unless-stopped
+    # Published ports rather than host networking, so this also runs on Docker
+    # Desktop (macOS/Windows), where host mode is unavailable or experimental.
+    #
+    # On a Linux host, prefer `network_mode: host` and drop `ports:` — it avoids
+    # the userland UDP proxy and is what production will do (bound to wg0).
+    ports:
+      - "8088:8088" # Janus HTTP API
+      - "7088:7088" # Janus admin API — localhost only in production
+      # Two distinct RTP ranges, and they are NOT interchangeable:
+      #   10000-10020 — the audiobridge plugin's plain-RTP participants (the
+      #                 boxes). Set in janus.plugin.audiobridge.jcfg.
+      #   20000-20020 — the Janus core's ICE/WebRTC media (browsers, later).
+      #                 Set in janus.jcfg.
+      - "10000-10020:10000-10020/udp"
+      - "20000-20020:20000-20020/udp"
+    volumes:
+      - ./janus/janus.jcfg:/opt/janus/etc/janus/janus.jcfg:ro
+      - ./janus/janus.transport.http.jcfg:/opt/janus/etc/janus/janus.transport.http.jcfg:ro
+      - ./janus/janus.plugin.audiobridge.jcfg:/opt/janus/etc/janus/janus.plugin.audiobridge.jcfg:ro
