@@ -59,6 +59,18 @@ It discovers the shift-register bit order, measures button bounce, finds a
 speaker-safe volume ceiling and prints a test ticket. See
 [architecture.md §3.5](docs/architecture.md).
 
+## Licensing
+
+Two licences, scoped by what they cover:
+
+| | |
+|---|---|
+| **Software** — everything outside `CAD/` | [MIT](LICENSE) |
+| **Hardware** — the KiCad and FreeCAD sources in `CAD/` | [CERN-OHL-S v2](CAD/LICENSE) (strongly reciprocal) |
+
+So you may do as you like with the code, and if you build on the board or the
+enclosure and distribute the result, those improvements stay open.
+
 ## Acknowledgements
 
 Bipbox grows out of [telex](https://github.com/gbwebdev/telex), an earlier
