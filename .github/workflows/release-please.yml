@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     branches: [main]
+  # Lets the release PR be regenerated on demand — `gh workflow run
+  # release-please.yml` — without pushing to main or re-running an old run.
+  workflow_dispatch:
 
 permissions:
   contents: write
