@@ -89,6 +89,18 @@ Pre-1.0 is configured with `bump-minor-pre-major`, so:
 That matches reality for a project at this stage: minor versions may break
 things and will say so in the notes. After 1.0 the normal SemVer rules apply.
 
+The first release is pinned to **0.1.0** via `initial-version`. Without it
+release-please treats an initial release as `1.0.0`, which would claim a
+stability this project has not earned yet.
+
+### Repository prerequisite
+
+Release-please opens its PR as GitHub Actions, which is forbidden by default.
+If you fork this repo, enable **Settings → Actions → General → Workflow
+permissions → "Allow GitHub Actions to create and approve pull requests"**, or
+the `Release` workflow fails with *"GitHub Actions is not permitted to create or
+approve pull requests"* after having already pushed its branch.
+
 ### The GITHUB_TOKEN caveat
 
 GitHub deliberately does not run workflows for events raised by
