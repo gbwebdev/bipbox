@@ -1,0 +1,32 @@
+# Reference only — telex is a separate repo, ported by hand (architecture.md §11).
+# Delete this directory once the port is complete.
+/telex/
+
+# Dead CAD tree, kept locally for reference only
+/.CAD_orig/
+
+# FreeCAD
+*.FCBak
+*.FCStd1
+
+# KiCad
+*-backups/
+~*.lck
+fp-info-cache
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and runtime state
+.env
+server/data/
+device/tools/wiring_test.json
+
+# OS
+.DS_Store
