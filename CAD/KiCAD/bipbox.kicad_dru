@@ -1,0 +1,42 @@
+(version 1)
+
+# Règles DRC pour PCBWay - 2 couches, options standard (sans surcoût)
+# Source des valeurs : page "PCB Capabilities" de PCBWay
+
+# --- Cuivre -------------------------------------------------------------
+
+# Min fabricable 4 mil, mais 6 mil (0,15 mm) recommandé pour éviter un surcoût
+(rule "PCBWay - largeur de piste min 6 mil"
+  (constraint track_width (min 0.15mm)))
+
+(rule "PCBWay - espacement cuivre min 6 mil"
+  (constraint clearance (min 0.15mm)))
+
+# Anneau minimal autour des trous : 0,15 mm
+# => via standard : perçage 0,3 mm + diamètre 0,6 mm minimum
+(rule "PCBWay - anneau min"
+  (constraint annular_width (min 0.15mm)))
+
+# --- Perçages -----------------------------------------------------------
+
+# Trous < 0,3 mm ou > 6,3 mm facturés en supplément
+(rule "PCBWay - diamètre de trou"
+  (constraint hole_size (min 0.3mm) (max 6.3mm)))
+
+# Valeur de prudence (non indiquée sur la page capabilities)
+(rule "Prudence - distance trou à trou"
+  (constraint hole_to_hole (min 0.25mm)))
+
+# --- Contour ------------------------------------------------------------
+
+# Valeur de prudence : la tolérance de détourage CNC est de ±0,2 mm
+(rule "Prudence - cuivre au bord de carte"
+  (constraint edge_clearance (min 0.3mm)))
+
+# --- Sérigraphie --------------------------------------------------------
+
+# Épaisseur de trait min 0,15 mm, hauteur min 0,8 mm
+(rule "PCBWay - texte sérigraphie"
+  (layer "?.Silkscreen")
+  (constraint text_thickness (min 0.15mm))
+  (constraint text_height (min 0.8mm)))

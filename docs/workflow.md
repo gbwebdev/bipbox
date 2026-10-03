@@ -55,21 +55,59 @@ footer. For this project "breaking" primarily means the device↔server protocol
 
 ## Releases
 
-SemVer tags `vX.Y.Z` on `main`, **one version for the whole repository**. The
-server and the device firmware are released together because they share a
-protocol; versioning them separately would invite combinations nobody tested.
+Releases are automated by **release-please**, driven entirely by the commit
+messages above — which is the practical reason Conventional Commits are
+mandatory rather than merely tidy.
 
-- `MAJOR` — breaking protocol or data-model change
-- `MINOR` — new features, backwards compatible
-- `PATCH` — fixes only
+SemVer tags `vX.Y.Z`, **one version for the whole repository** (`version.txt` is
+the single source of truth). The server and the device firmware release together
+because they share a protocol; versioning them separately would invite
+combinations nobody tested.
 
-A tag triggers a GitHub Release carrying the generated changelog and, once
-phase 6 exists, the built `.img.xz` as an asset. The device's "check for update"
+### How it works
+
+1. Merge PRs into `main` as usual.
+2. The `Release` workflow opens and keeps updating a **release PR** —
+   "chore(main): release X.Y.Z" — which bumps `version.txt` and writes
+   `CHANGELOG.md`.
+3. Merging that PR tags the release and publishes a GitHub Release with the
+   generated notes.
+
+Nothing is released until that PR is merged, so the release PR is also the
+moment to read the changelog and decide whether it is time.
+
+### Version bumps
+
+Pre-1.0 is configured with `bump-minor-pre-major`, so:
+
+| Commit | Bump while < 1.0 |
+|---|---|
+| `fix:` | patch |
+| `feat:` | minor |
+| `feat!:` / `BREAKING CHANGE:` | **minor**, not major |
+
+That matches reality for a project at this stage: minor versions may break
+things and will say so in the notes. After 1.0 the normal SemVer rules apply.
+
+### The GITHUB_TOKEN caveat
+
+GitHub deliberately does not run workflows for events raised by
+`GITHUB_TOKEN`, so **CI does not run on the release PR** and its required
+`lint`/`test` checks sit pending forever. Two ways out:
+
+- **Merge it with admin bypass** (`enforce_admins` is off, so this works today).
+  Safe enough: the release PR only touches `version.txt` and `CHANGELOG.md`, and
+  CI already passed on every commit it describes.
+- **Add a `RELEASE_PLEASE_TOKEN` secret** — a fine-grained PAT with
+  *contents: write* and *pull requests: write* on this repo. The workflow picks
+  it up automatically and the release PR then gets real CI runs.
+
+### Release assets
+
+Once phase 6 exists, the built `.img.xz` is attached to the release, gated on
+release-please's `release_created` output. The device's "check for update"
 button (Q36) reads the latest release from the public API — there is no
 auto-update.
-
-Pre-1.0 the usual caveat applies: minor versions may break things, and will say
-so in the release notes.
 
 ## Compatibility
 
