@@ -122,10 +122,21 @@ orange-vs-blue is also a harness question, though those two are at least
 distinguishable by eye.
 
 It follows that the mapping **must be discovered per box and stored**, not
-assumed. `context.md`'s "QD = telex, QE = VoIP" was a guess, and on the first
-box built it is the other way round. The bit-walk in §3.5 exists precisely for
-this, and `Device` carries the discovered map so two boxes may legitimately
-differ.
+assumed. The bit-walk in §3.5 exists precisely for this, and two boxes may
+legitimately differ.
+
+**Measured on box A (2026-10-07), confirming the prediction:**
+
+| Bit | Output | LED | vs. `context.md` |
+|---|---|---|---|
+| 2 | QC | telegraphy (orange) | as assumed |
+| 3 | QD | **VoIP** (green) | **swapped** |
+| 4 | QE | **telex** (green) | **swapped** |
+| 5 | QF | WiFi (blue) | as assumed |
+
+The two 180 Ω positions (QC/QF) came out as guessed; the two identical 300 Ω
+positions (QD/QE) came out reversed — exactly where the board carries no
+information. `context.md` should be corrected to drop the claim.
 
 On the chip: you're swapping to **74HCT595N** (F2). Software is unaffected —
 the fix is purely about input thresholds, so develop against the 74HC595N now
@@ -273,6 +284,39 @@ What it does:
 - **Printer** — detect and print a test ticket.
 - **`--selftest`** — runs everything in sequence with a PASS/FAIL summary.
 
+### 3.6 Box A calibration — the bring-up result
+
+Bring-up finished 2026-10-07. The tool's `wiring_test.json` is not a scratch
+file: **it is the calibration for that box**, and the daemon reads the same
+values from `/etc/bipbox/calibration.json` (seeded from it by the installer).
+Nothing here is derivable from the schematic, so it cannot be recreated by
+inspection — only by walking the hardware again.
+
+```json
+{
+  "led_bits":        { "telegraphy": 2, "voip": 3, "telex": 4, "wifi": 5 },
+  "mixer_control":   "Speaker",
+  "volume_max_pct":  90,
+  "playback_gain":   4,
+  "capture_control": "Mic",
+  "capture_pct":     60
+}
+```
+
+| Value | Note |
+|---|---|
+| `led_bits` | QD/QE reversed from the guess (§3.2). Per-box. |
+| `mixer_control` / `capture_control` | This UGREEN card exposes **`Speaker`** and **`Mic`**, not `PCM`. The daemon must use the *saved* names rather than re-probing, so a card swap is a deliberate recalibration. |
+| `volume_max_pct` 90 | Chosen knowingly above the 75% caution point: walkie-talkie distortion is acceptable here, and the speaker is in no danger (§6.3.2). |
+| `playback_gain` ×4 | Validates §6.3.3 — spending crest factor is what made speech audible. |
+| `capture_pct` 60 | **Lower than the 80 I had assumed.** The mic was never weak; it was simply that no capture control was being set at all. Above 60 it clipped. |
+
+**Longevity note, not a warning:** 90% mixer plus ×4 clipped gain means the
+codec is driven near full scale into a ~12 Ω load whenever VoIP is active —
+the hardest configuration for it. That is an informed trade for loudness, and
+the sound card is a cheap, socketed, replaceable part. If one ever fails, this
+is the first thing to look at rather than a mystery.
+
 ---
 
 ## 4. Data model
@@ -286,6 +330,10 @@ Device(uuid PK, channel_id FK, alias, secret_hash,
        paper_cols=42, paper_dots=576, printer_info, ptt_wiring,
        wg_pubkey, wg_ip, fw_version,
        last_seen, ip_address, mac_address, enabled, created_at)
+# Hardware calibration (§3.6) deliberately does NOT live here: LED bit order,
+# mixer control names and gain settings are properties of one physical box and
+# its harness, useless to the server, and needed before the box can even reach
+# it. They stay in /etc/bipbox/calibration.json on the device.
 
 Account(id, login UNIQUE, display_name, password_hash,
         totp_secret, is_admin, enabled, created_at, last_login)

@@ -41,12 +41,15 @@ from pathlib import Path
 
 STATE_FILE = Path(__file__).with_name("wiring_test.json")
 
-# Assumed 74HC(T)595 bit → LED mapping, shifting MSB-first so the first bit sent
-# lands on QH. Overridden by whatever the bit-walk discovers.
+# 74HC(T)595 bit → LED mapping, shifting MSB-first so the first bit sent lands
+# on QH. These are the values MEASURED on box A, not a guess -- but the two
+# greens are an artefact of how the harness was crimped, not of the PCB (QD and
+# QE are both 300R into adjacent pins of J5), so every box must still be walked
+# and may legitimately differ. See architecture.md 3.2.
 DEFAULT_LED_BITS = {
     "telegraphy": 2,  # QC, orange, 180R
-    "telex": 3,  # QD, green, 300R
-    "voip": 4,  # QE, green, 300R
+    "voip": 3,  # QD, green, 300R
+    "telex": 4,  # QE, green, 300R
     "wifi": 5,  # QF, blue, 180R
 }
 
@@ -63,7 +66,9 @@ ACCEPT_MS = 2
 # into an 8.6R driver, so there is only ~3dB of attenuation: the speaker receives
 # tens of milliwatts and is in no danger. What the ceiling protects is the USB
 # codec, which is driving a load well below its rating and distorts when pushed.
-# 70% was the clean limit measured on box A (architecture.md 6.3.2).
+# Box A ended up at 90% with a x4 voice gain, having decided that walkie-talkie
+# distortion is acceptable; 70 stays the shipped default so a fresh card is not
+# startling (architecture.md 6.3.2).
 DEFAULT_VOLUME_PCT = 70
 VOLUME_WARN_PCT = 75  # above the measured-clean point, so 80+ asks first
 VOLUME_SWEEP = [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -72,7 +77,7 @@ MIXER_CANDIDATES = ("PCM", "Speaker", "Headphone", "Master", "Playback")
 # Capture: the speakermic is a low-output dynamic element into a cheap USB
 # codec, so it needs real gain rather than the card's default.
 CAPTURE_CANDIDATES = ("Mic", "Capture", "Microphone", "Front Mic", "Internal Mic")
-DEFAULT_CAPTURE_PCT = 80
+DEFAULT_CAPTURE_PCT = 60  # measured on box A; above this the mic clipped
 CAPTURE_SWEEP = [40, 60, 70, 80, 90, 100]
 # Healthy speech peaks. Below the floor it is inaudible; above the ceiling it
 # clips, and clipping into a mono comms mic sounds far worse than it measures.
