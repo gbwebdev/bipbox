@@ -481,6 +481,7 @@ puts a hard ceiling below every user-facing control:
 | `voip_volume_pct` | software gain, VoIP branch | 0–100% **of the ceiling** |
 | `bip_volume_pct` | software gain, bip generator | 0–100% **of the ceiling** |
 | `capture_pct` | **ALSA capture mixer** | 0–100%, set by the §3.5 mic sweep |
+| `voice_gain` | software gain + hard limiter, playback | ×1–×8, user-facing (§6.3.3) |
 
 **Measured 2026-10-07 on the first box: 70% is the ceiling.** 80% is still
 tolerable but a faint buzz is audible, so 70 is the last clean step and becomes
@@ -574,6 +575,53 @@ rationale in §6.3.1**; the ceiling model itself stands.
 Practically: you can set the user volume anywhere up to the ceiling without
 worrying about the speaker, and the ceiling is a card-longevity setting rather
 than a safety interlock.
+
+### 6.3.3 Making speech carry: crest factor, not volume
+
+**Observed 2026-10-07: the test tone is comfortably loud while recorded speech
+has to be strained for — at the same mixer setting.** That is not a fault, and
+no volume control fixes it. It is crest factor:
+
+| Signal | Peak | RMS | Crest |
+|---|---|---|---|
+| Sine (the test tone) | 0 dBFS | −3 dB | **~3 dB** |
+| Speech | 0 dBFS | −14 to −20 dB | **14–20 dB** |
+
+Loudness follows RMS, not peak. Normalised to the same peak, speech carries
+**10–17 dB less average power** than a tone. The chain is behaving correctly;
+speech simply uses its headroom for transients instead of loudness.
+
+Since quality is explicitly not a goal here — the device imitates a walkie-talkie,
+and those are not prized for fidelity — the right move is to **spend that crest
+factor deliberately**, which is exactly what handheld radios and amateur-radio
+speech processors do.
+
+**Design: a `voice_gain` stage on the playback branch**, user-adjustable
+alongside the volume (§6.3.1), applying digital make-up gain followed by a hard
+limiter. Clipping is the intended effect, not a side effect.
+
+Measured expectation, so this is not oversold: on a synthetic 10 dB-crest
+signal, hard clipping alone bought **+2.6 dB at ×2 and +3.9 dB at ×8** — real,
+but bounded and sharply diminishing, because clipping only flattens peaks. Real
+speech at 14–18 dB crest has more to give, but the honest ceiling for
+clipping alone is a handful of dB.
+
+**To go further, compress rather than clip** — raising the quiet parts gains far
+more RMS per dB of peak than squashing the loud ones. In the GStreamer pipeline
+(§6.2), in increasing order of cost:
+
+| Stage | Element | Notes |
+|---|---|---|
+| Make-up gain + limiter | `audioamplify amplification=N clipping-method=clip` | Cheapest; `clipping-method` must be `clip`, since the default wraps and would sound catastrophic |
+| Compressor | `audiodynamic mode=compressor characteristics=soft-knee` | `gstreamer1.0-plugins-good`, modest cost, the real win |
+| Voice AGC | `webrtcdsp gain-control=true` | Purpose-built for speech, but `plugins-bad` and the heaviest on ARMv6 — measure before adopting |
+
+Start with gain + limiter because it is nearly free, add `audiodynamic` if that
+is not enough, and treat `webrtcdsp` as a last resort on this CPU.
+
+The bring-up tool exposes this as `--gain-sweep`: it records three seconds,
+reports peak/RMS/crest, then replays at ×1 to ×8 showing what fraction of
+samples clip at each step, and stores the chosen `playback_gain`.
 
 ### 6.4 Browser media — selectable transport mode
 

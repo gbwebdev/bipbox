@@ -141,6 +141,90 @@ def test_capture_window_is_sane(tool):
     assert tool.DEFAULT_CAPTURE_PCT in tool.CAPTURE_SWEEP
 
 
+def _write(path, samples, rate=8000):
+    import array
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(array.array("h", samples).tobytes())
+
+
+def test_sine_crest_factor_is_about_three_db(tool, tmp_path):
+    """The reference point for the whole loudness argument (architecture.md §6.3.3)."""
+    path = tmp_path / "tone.wav"
+    tool.write_tone(path, seconds=0.5, volume=0.9)
+    assert tool.crest_db(path) == pytest.approx(3.0, abs=0.5)
+
+
+def test_bursty_signal_has_a_much_higher_crest_than_a_sine(tool, tmp_path):
+    """Why a tone is loud and speech is not, at the same peak level."""
+    rate = 8000
+    bursty = [
+        int(30000 * (1.0 if (i // 400) % 5 == 0 else 0.03) * math.sin(2 * math.pi * 300 * i / rate))
+        for i in range(rate)
+    ]
+    path = tmp_path / "bursty.wav"
+    _write(path, bursty, rate)
+
+    tone = tmp_path / "tone.wav"
+    tool.write_tone(tone, seconds=0.5, volume=0.9)
+
+    assert tool.crest_db(path) > tool.crest_db(tone) + 5
+    assert tool.peak_level(path) == pytest.approx(tool.peak_level(tone), abs=0.05)
+    assert tool.rms_level(path) < tool.rms_level(tone)
+
+
+def test_apply_gain_raises_rms_and_reports_clipping(tool, tmp_path):
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(8000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    before = tool.rms_level(src)
+    clipped = tool.apply_gain(src, dst, 2)
+
+    assert clipped == 0.0  # 8000 x2 still fits in int16
+    assert tool.rms_level(dst) == pytest.approx(2 * before, rel=0.02)
+
+
+def test_apply_gain_hard_clips_instead_of_wrapping(tool, tmp_path):
+    """Integer overflow would wrap to the opposite rail and sound catastrophic."""
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(30000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    clipped = tool.apply_gain(src, dst, 8)
+
+    assert clipped > 0.5
+    samples, _ = tool.read_samples(dst)
+    assert max(samples) == 32767
+    assert min(samples) >= -32768
+    assert tool.peak_level(dst) == pytest.approx(1.0, abs=0.001)
+
+
+def test_gain_of_one_is_a_no_op(tool, tmp_path):
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(10000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    assert tool.apply_gain(src, dst, 1) == 0.0
+    assert tool.read_samples(src)[0] == tool.read_samples(dst)[0]
+
+
+def test_gain_sweep_starts_at_unity(tool):
+    assert tool.GAIN_SWEEP[0] == 1
+    assert sorted(tool.GAIN_SWEEP) == tool.GAIN_SWEEP
+
+
+def test_rms_and_crest_of_a_missing_file_do_not_raise(tool, tmp_path):
+    assert tool.rms_level(tmp_path / "nope.wav") == 0.0
+    assert tool.crest_db(tmp_path / "nope.wav") == 0.0
+
+
 def test_level_bar_verdicts(tool):
     assert "SILENT" in tool.level_bar(0.0)
     assert "weak" in tool.level_bar(0.10)

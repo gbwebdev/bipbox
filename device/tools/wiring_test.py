@@ -22,6 +22,7 @@ Usage:
     sudo python3 wiring_test.py --audio        audio test only
     sudo python3 wiring_test.py --volume-sweep find the safe speaker ceiling
     sudo python3 wiring_test.py --mic-sweep    find a usable capture gain
+    sudo python3 wiring_test.py --gain-sweep   find a voice gain (louder, clipped)
     sudo python3 wiring_test.py --printer      printer test only
 """
 
@@ -77,6 +78,11 @@ CAPTURE_SWEEP = [40, 60, 70, 80, 90, 100]
 # clips, and clipping into a mono comms mic sounds far worse than it measures.
 CAPTURE_TARGET_MIN = 0.25
 CAPTURE_TARGET_MAX = 0.85
+
+# Digital make-up gain applied after the mixer, hard-clipped. The mixer is
+# already at its useful limit, so the only way left to make speech carry is to
+# spend its crest factor -- which is what a handheld radio does.
+GAIN_SWEEP = [1, 2, 3, 4, 6, 8]
 
 # Blink patterns from architecture.md §3.4, as (on_ms, off_ms) sequences.
 PATTERNS = {
@@ -567,6 +573,64 @@ def write_tone(path, freq=880, seconds=2.0, rate=8000, volume=0.5):
         w.writeframes(frames.tobytes())
 
 
+def read_samples(path):
+    try:
+        with wave.open(str(path), "rb") as w:
+            frames = w.readframes(w.getnframes())
+            params = w.getparams()
+    except Exception:
+        return array.array("h"), None
+    samples = array.array("h")
+    samples.frombytes(frames[: len(frames) // 2 * 2])
+    return samples, params
+
+
+def rms_level(path):
+    """RMS, which is what loudness actually follows — unlike peak."""
+    samples, _ = read_samples(path)
+    if not samples:
+        return 0.0
+    total = sum(float(s) * s for s in samples)
+    return math.sqrt(total / len(samples)) / 32767
+
+
+def crest_db(path):
+    """Peak-to-RMS in dB. ~3 dB for a sine, 14-20 dB for speech.
+
+    This single number explains why a test tone is comfortably loud while
+    speech at the same peak level is inaudible: the tone carries ten-plus dB
+    more average power for the same headroom.
+    """
+    peak, rms = peak_level(path), rms_level(path)
+    if rms <= 0 or peak <= 0:
+        return 0.0
+    return 20 * math.log10(peak / rms)
+
+
+def apply_gain(src, dst, gain):
+    """Multiply and hard-clip. Returns the fraction of samples clipped.
+
+    Hard clipping is not a compromise here, it is the intended effect: it is
+    how a cheap handheld radio gets usable loudness out of a weak amplifier,
+    and it is what makes speech carry. Quality is explicitly not the goal.
+    """
+    samples, params = read_samples(src)
+    if not samples or params is None:
+        return 0.0
+    clipped = 0
+    for i, s in enumerate(samples):
+        v = int(s * gain)
+        if v > 32767:
+            v, clipped = 32767, clipped + 1
+        elif v < -32768:
+            v, clipped = -32768, clipped + 1
+        samples[i] = v
+    with wave.open(str(dst), "wb") as w:
+        w.setparams(params)
+        w.writeframes(samples.tobytes())
+    return clipped / len(samples)
+
+
 def peak_level(path):
     try:
         with wave.open(str(path), "rb") as w:
@@ -646,6 +710,46 @@ def level_bar(level, width=40):
         else "good"
     )
     return f"peak {level * 100:5.1f}%  [{''.join(bar)}]  {verdict}"
+
+
+def run_gain_sweep(dev, rec):
+    """Play a recording back at increasing digital gain, hard-clipped.
+
+    Separate from the mixer sweep on purpose: the mixer is already at its
+    useful limit, and what is missing is average level, not peak.
+    """
+    print("\n── Voice gain ───────────────────────────────────────────────────")
+    print(
+        f"  Source: peak {peak_level(rec) * 100:.0f}%, "
+        f"RMS {rms_level(rec) * 100:.1f}%, crest {crest_db(rec):.0f} dB"
+    )
+    print("  A tone sits near 3 dB of crest; speech is 14-20 dB, which is why")
+    print("  the tone is loud and your voice is not. Gain plus clipping trades")
+    print("  that headroom for loudness, exactly as a handheld radio does.\n")
+
+    boosted = Path("/tmp/bipbox_gain.wav")
+    best = 1.0
+    for gain in GAIN_SWEEP:
+        clipped = apply_gain(rec, boosted, gain)
+        print(
+            f"  x{gain:<4g} ({20 * math.log10(gain):+.0f} dB)  "
+            f"clipped {clipped * 100:5.1f}% of samples …",
+            end=" ",
+            flush=True,
+        )
+        subprocess.run(["aplay", "-q", "-D", dev, str(boosted)], capture_output=True)
+        answer = input("good? [y/N/q] ").strip().lower()
+        if answer in ("y", "yes"):
+            best = gain
+        elif answer in ("q", "quit"):
+            break
+    boosted.unlink(missing_ok=True)
+
+    print(f"\n  Chosen voice gain: x{best:g} ({20 * math.log10(best):+.0f} dB)")
+    if input("  Save it? [y/N] ").strip().lower() == "y":
+        save_state(playback_gain=best)
+        print(f"  Saved to {STATE_FILE.name}")
+    return best
 
 
 def run_capture_sweep(card_idx, control, dev, has_agc=False):
@@ -791,14 +895,22 @@ def run_audio(volume_pct=None):
     subprocess.run(["aplay", "-q", "-D", dev, str(rec)], capture_output=True)
     back = input("      Did you hear your voice? [y/N] ").strip().lower() == "y"
 
-    for f in (tone, rec):
-        f.unlink(missing_ok=True)
+    tone.unlink(missing_ok=True)
 
     if cap_control and (
         level < CAPTURE_TARGET_MIN
         or input("\n  Run the mic gain sweep? [y/N] ").strip().lower() == "y"
     ):
         run_capture_sweep(idx, cap_control, dev, has_agc)
+
+    # Kept until here on purpose: the gain sweep needs the recording, and this
+    # is the moment the user has just heard that it is too quiet.
+    if (
+        rec.exists()
+        and input("\n  Voice too quiet? Run the voice gain sweep? [y/N] ").strip().lower() == "y"
+    ):
+        run_gain_sweep(dev, rec)
+    rec.unlink(missing_ok=True)
 
     if (
         control
@@ -866,6 +978,29 @@ def run_printer():
     return input("  Did it print correctly? [y/N] ").strip().lower() == "y"
 
 
+def gain_sweep_entry():
+    card = find_usb_card()
+    if not card:
+        print("\n  No ALSA card found.")
+        return False
+    idx, _ = card
+    dev = f"plughw:{idx},0"
+    rec = Path("/tmp/bipbox_voice.wav")
+    print("\n  Recording 3 s — speak normally…")
+    r = subprocess.run(
+        ["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", "8000", "-c", "1", "-d", "3", str(rec)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(f"  arecord failed: {r.stderr.strip()[:200]}")
+        return False
+    try:
+        return bool(run_gain_sweep(dev, rec))
+    finally:
+        rec.unlink(missing_ok=True)
+
+
 def capture_sweep_entry():
     card = find_usb_card()
     if not card:
@@ -921,6 +1056,7 @@ def menu(leds):
         ("Audio (tone out, record, playback)", run_audio),
         ("Volume sweep (find the safe ceiling)", volume_sweep_entry),
         ("Mic gain sweep", capture_sweep_entry),
+        ("Voice gain sweep (louder, clipped)", gain_sweep_entry),
         ("Printer test ticket", run_printer),
     ]
     while True:
@@ -988,6 +1124,7 @@ def main():
         f"(default {DEFAULT_VOLUME_PCT}%%, or the saved ceiling)",
     )
     ap.add_argument("--mic-sweep", action="store_true", help="find a usable capture gain")
+    ap.add_argument("--gain-sweep", action="store_true", help="find a voice gain (louder, clipped)")
     ap.add_argument(
         "--pin",
         type=int,
@@ -1011,6 +1148,8 @@ def main():
         return 0 if volume_sweep_entry() else 1
     if args.mic_sweep:
         return 0 if capture_sweep_entry() else 1
+    if args.gain_sweep:
+        return 0 if gain_sweep_entry() else 1
     if args.audio:
         return 0 if run_audio(args.volume) else 1
     if args.printer:
