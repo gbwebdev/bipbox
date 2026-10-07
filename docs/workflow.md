@@ -101,18 +101,33 @@ permissions → "Allow GitHub Actions to create and approve pull requests"**, or
 the `Release` workflow fails with *"GitHub Actions is not permitted to create or
 approve pull requests"* after having already pushed its branch.
 
-### The GITHUB_TOKEN caveat
+### `RELEASE_PLEASE_TOKEN`
 
-GitHub deliberately does not run workflows for events raised by
-`GITHUB_TOKEN`, so **CI does not run on the release PR** and its required
-`lint`/`test` checks sit pending forever. Two ways out:
+GitHub deliberately does not run workflows for events raised by `GITHUB_TOKEN`.
+With the default token the release PR therefore gets **no CI at all** and its
+required `lint`/`test` checks sit pending forever, leaving an admin bypass as
+the only way to merge it.
 
-- **Merge it with admin bypass** (`enforce_admins` is off, so this works today).
-  Safe enough: the release PR only touches `version.txt` and `CHANGELOG.md`, and
-  CI already passed on every commit it describes.
-- **Add a `RELEASE_PLEASE_TOKEN` secret** — a fine-grained PAT with
-  *contents: write* and *pull requests: write* on this repo. The workflow picks
-  it up automatically and the release PR then gets real CI runs.
+This repository is configured with a **`RELEASE_PLEASE_TOKEN`** secret — a
+fine-grained PAT scoped to this repo with *Contents: read and write* and
+*Pull requests: read and write*, and nothing else. The workflow picks it up
+automatically via `${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}`,
+so a fork without the secret still works, just without CI on release PRs.
+
+Verified 2026-10-03: with the PAT the release PR is authored by the token's
+owner and `lint`/`test` run on it normally, merge state `CLEAN`.
+
+Two consequences to keep in mind:
+
+- **The release PR is authored by you**, so you cannot approve it. Harmless
+  while required approvals are 0, but raising that number would make release
+  PRs unmergeable without a second person.
+- **Fine-grained PATs expire.** When it does, `Release` starts failing with a
+  401 and release PRs quietly stop appearing; GitHub emails a warning about a
+  week ahead. Rotate it with
+  `gh secret set RELEASE_PLEASE_TOKEN --repo gbwebdev/bipbox`. If this becomes
+  annoying, a GitHub App via `actions/create-github-app-token` mints a
+  short-lived token per run and removes the expiry entirely.
 
 ### Release assets
 
