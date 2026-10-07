@@ -178,7 +178,19 @@ Timings (Q30, with the AP pause removed as you asked):
 | `fast` | 175 ms on / 175 ms off |
 | `heartbeat` | 200 ms on / 2800 ms off — a **3 s** cycle |
 | `ap` | 200 on, 200 off, 200 on, 200 off, 500 on, 200 off — repeating, no pause |
-| `flash` | 50 ms per event, held visible ≥ 150 ms |
+| `flash` | activity: `fast`, held **350 ms**, and it **starts dark** |
+
+**The flash needed two corrections, both found by implementing it.** Activity
+is shown on a lamp that is usually *steady-on* (telex connected, then
+receiving), so:
+
+- It must last **at least one full `fast` cycle** (350 ms). A shorter flash can
+  land entirely inside the pattern's lit phase and produce no visible change
+  whatsoever — invisible exactly when it matters.
+- It must **open with the dark phase**. On a lit lamp only a gap registers, so
+  the flash carries its own phase origin rather than following the global one.
+  Repeated flashes extend it without restarting that phase, so sustained
+  activity reads as continuous blinking instead of a stutter.
 
 **Tuned on the real LEDs over two passes**, which is why the pattern preview
 exists — every one of these read too brief or too quick on paper:

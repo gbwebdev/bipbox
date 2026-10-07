@@ -9,3 +9,6 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Makes the bipboxd package importable without installing it; the device code
+# is deployed as a directory on the Pi, not as a wheel.
+pythonpath = ["device"]
