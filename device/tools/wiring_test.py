@@ -52,10 +52,17 @@ DEFAULT_LED_BITS = {
 PIN_TELEGRAPHY = 2
 PIN_PTT = 23
 
-# Speaker protection. The shoulder speakermic holds a small, cheap driver behind
-# a 22R series resistor; sustained level is what kills it, so every test starts
-# conservative and never jumps to full scale. 70% is the measured ceiling on
-# the first box: 80% buzzes faintly (architecture.md 6.3.1).
+# How long a level must hold before it is accepted as a real change. The HAT's
+# RC network already debounces in hardware, so this only has to reject chatter
+# -- and it must stay small, because it is also the shortest press that can be
+# seen at all.
+ACCEPT_MS = 2
+
+# Output level. The series resistor is 3.3R (not the 22R the schematic shows),
+# into an 8.6R driver, so there is only ~3dB of attenuation: the speaker receives
+# tens of milliwatts and is in no danger. What the ceiling protects is the USB
+# codec, which is driving a load well below its rating and distorts when pushed.
+# 70% was the clean limit measured on box A (architecture.md 6.3.2).
 DEFAULT_VOLUME_PCT = 70
 VOLUME_WARN_PCT = 75  # above the measured-clean point, so 80+ asks first
 VOLUME_SWEEP = [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -334,40 +341,59 @@ def run_buttons(duration=30, pins=None):
     def level(dev):
         return 0 if dev.value else 1
 
+    # A level is accepted once it has held for ACCEPT_MS. This must stay small:
+    # the HAT's own RC already debounces, and anything larger starts swallowing
+    # genuine short taps. An earlier version gated *printing* on 80 ms of quiet,
+    # which silently lost the release of any press shorter than that.
+    accept_s = ACCEPT_MS / 1000
+
     stats = {
-        name: {"presses": 0, "transitions": 0, "bounce_ms": [], "last": level(dev)}
+        name: {
+            "presses": 0,
+            "raw": 0,
+            "accepted": 0,
+            "durations": [],
+            "stable": level(dev),
+            "last_raw": level(dev),
+            "changed_at": 0.0,
+            "pressed_at": None,
+        }
         for name, dev in inputs.items()
     }
-    pending = dict.fromkeys(inputs)
 
-    start = time.monotonic()
-    deadline = start + duration
+    deadline = time.monotonic() + duration
     next_redraw = 0.0
     try:
         while time.monotonic() < deadline:
             now = time.monotonic()
             for name, dev in inputs.items():
-                lvl = level(dev)
+                raw = level(dev)
                 st = stats[name]
-                if lvl != st["last"]:
-                    st["last"] = lvl
-                    st["transitions"] += 1
-                    if pending[name] is None:
-                        pending[name] = now
-                        if lvl == 0:
-                            st["presses"] += 1
-                            print(f"\n  {name:12s} PRESSED")
+
+                if raw != st["last_raw"]:
+                    st["last_raw"] = raw
+                    st["raw"] += 1
+                    st["changed_at"] = now
+
+                if raw != st["stable"] and now - st["changed_at"] >= accept_s:
+                    st["stable"] = raw
+                    st["accepted"] += 1
+                    if raw == 0:
+                        st["presses"] += 1
+                        st["pressed_at"] = now
+                        print(f"\n  {name:12s} PRESSED")
+                    else:
+                        if st["pressed_at"] is not None:
+                            held = (now - st["pressed_at"]) * 1000
+                            st["durations"].append(held)
+                            print(f"\n  {name:12s} released  (held {held:.0f} ms)")
                         else:
                             print(f"\n  {name:12s} released")
-                elif pending[name] is not None and now - pending[name] > 0.08:
-                    # Settled: everything inside this window was bounce.
-                    st["bounce_ms"].append((now - pending[name]) * 1000)
-                    pending[name] = None
 
             if now >= next_redraw:
                 next_redraw = now + 0.1
                 live = "  ".join(
-                    f"{name}=GPIO{pins[name]}:{stats[name]['last']}" for name in inputs
+                    f"{name}=GPIO{pins[name]}:{stats[name]['stable']}" for name in inputs
                 )
                 remaining = int(deadline - now)
                 sys.stdout.write(f"\r  levels  {live}   ({remaining}s left) ")
@@ -381,7 +407,7 @@ def run_buttons(duration=30, pins=None):
     for name, st in stats.items():
         if st["presses"] == 0:
             ok = False
-            stuck = "high (1)" if st["last"] == 1 else "low (0)"
+            stuck = "high (1)" if st["stable"] == 1 else "low (0)"
             print(f"    {name:12s} NO presses detected — level stayed {stuck}")
             if pins[name] in (2, 3):
                 print(f"                 GPIO{pins[name]} carries a FIXED 1.8k pull-up to")
@@ -389,21 +415,24 @@ def run_buttons(duration=30, pins=None):
                 print("                 resistance cannot pull it below the logic")
                 print("                 threshold — measure the pin while pressed.")
             continue
-        extra = st["transitions"] - 2 * st["presses"]
-        worst = max(st["bounce_ms"]) if st["bounce_ms"] else 0.0
+
+        bounce = max(0, st["raw"] - st["accepted"])
+        shortest = min(st["durations"]) if st["durations"] else 0.0
+        longest = max(st["durations"]) if st["durations"] else 0.0
         print(
             f"    {name:12s} {st['presses']} press(es), "
-            f"{st['transitions']} transitions "
-            f"({'clean' if extra <= 0 else f'{extra} extra = bounce'}), "
-            f"worst settle {worst:.1f} ms"
+            f"{st['raw']} raw / {st['accepted']} accepted edges "
+            f"({'clean' if bounce == 0 else f'{bounce} bounce edge(s)'})"
         )
+        if st["durations"]:
+            print(f"                 held: {shortest:.0f}-{longest:.0f} ms")
+        if len(st["durations"]) < st["presses"]:
+            missed = st["presses"] - len(st["durations"])
+            print(f"                 {missed} press(es) with no matching release")
 
-    print("\n  Debounce guidance: set the daemon's debounce above the worst")
-    print("  settle time. Defaults are 20 ms (dedicated PTT) / 50 ms (shared).")
-
-    for dev in inputs.values():
-        dev.close()
-    return ok
+    print(f"\n  Acceptance window: {ACCEPT_MS} ms. Any press shorter than that")
+    print("  is invisible, so keep the daemon's debounce small — the HAT's RC")
+    print("  does the real work.")
 
     for dev in inputs.values():
         dev.close()

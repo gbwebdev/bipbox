@@ -538,40 +538,42 @@ sound card speaker out (J3.3) ──[R11 22Ω]── J4.4 (TRRS tip) ── spea
 R11 in series with a low-impedance speaker is a voltage divider, and it throws
 away most of the signal:
 
-Attenuation, with R12 fitted, against the series resistor:
+**The schematic's 22 Ω for R11 is stale: the boards are built with 3.3 Ω**, and
+have been throughout testing. The measured speaker is **8.6 Ω**. So the real
+numbers are:
 
-| Speaker | R11 = 22 Ω (as designed) | R11 = 10 Ω | **R11 = 3.3 Ω (as built)** |
-|---|---|---|---|
-| 8 Ω | −12.5 dB | −7.0 dB | **−3.4 dB** |
-| 16 Ω | −9.1 dB | −4.2 dB | **−2.1 dB** |
-| 32 Ω | −6.7 dB | −2.4 dB | **−1.4 dB** |
+| Stage | Value |
+|---|---|
+| Attenuation, R11 = 3.3 Ω into 8.6 Ω (R12 fitted) | **−3.3 dB** |
+| Same with R12 removed | −2.8 dB (so removing it gains 0.5 dB — pointless) |
+| Maximum possible gain left, shorting R11 | +3.3 dB |
 
-Two conclusions:
+**There is therefore no meaningful hardware gain left on this path, and no
+software gain either** — the mixer cannot exceed 0 dBFS without clipping. The
+output is quiet because **the USB codec cannot drive this load any louder**: a
+headphone-class output into ~12 Ω runs at or past its current limit. If louder
+is genuinely required, the honest answer is a small amplifier module
+(PAM8302-class) between the card and the speaker, not another resistor.
 
-1. **R12 is barely the problem.** As a shunt to ground it costs 1–2 dB at
-   22 Ω and only ~0.4 dB at 3.3 Ω. Removing it is pointless; leave it fitted.
-2. **R11 was the problem.** **Box A was reworked to 3.3 Ω on 2026-10-07**,
-   worth about +9 dB into 8 Ω, +7 dB into 16 Ω.
+Action: **`CAD/` should be updated so the schematic says 3.3 Ω**, since it is
+published for others to build from.
 
-**This also corrects the rationale in §6.3.1.** The faint buzz at 80% was the
-codec running out of clean output, not the speaker struggling — the speaker
-receives tens of milliwatts, far inside its rating. So `volume_max_pct` is an
-**amplifier-headroom** limit, not speaker protection. The ceiling model stands;
-the reason for it was wrong.
+#### What is actually at risk
 
-#### The ceiling must be re-measured after an R11 change
+| Part | Risk | Why |
+|---|---|---|
+| **Speaker** (8.6 Ω) | **None** | It receives tens of milliwatts against a rating of several hundred — roughly 2–3% of capacity. It cannot be damaged by anything this card can produce. |
+| **USB sound card** | **The real one** | It is driving ~12 Ω where 16–32 Ω is specified. Codecs of this class current-limit rather than fail, but sustained overdrive means sustained heat in the output stage. |
 
-At 3.3 Ω the codec sees roughly a **10 Ω load instead of ~30 Ω**, well below
-what a headphone-class output is specified for (16–32 Ω). It will current-limit
-and distort *earlier* in the volume range than before, so **the measured 70%
-ceiling is stale and probably too high now** — re-run `--volume-sweep`. The
-limit remains audible distortion rather than damage, so finding it by ear is
-both safe and the only sensible method.
+So `volume_max_pct` protects the **card**, not the speaker — and the right
+setting is simply *below where distortion starts*, because audible distortion
+is the symptom of the card being pushed past its limit. The 70% you measured is
+already that number, arrived at for the wrong stated reason. **This corrects the
+rationale in §6.3.1**; the ceiling model itself stands.
 
-Side effect worth knowing: 3.3 Ω offers little protection if the TRRS plug
-shorts tip to sleeve on insertion. Headphone outputs are generally
-short-tolerant and the event is momentary, so this is accepted rather than
-designed around.
+Practically: you can set the user volume anywhere up to the ceiling without
+worrying about the speaker, and the ceiling is a card-longevity setting rather
+than a safety interlock.
 
 ### 6.4 Browser media — selectable transport mode
 
