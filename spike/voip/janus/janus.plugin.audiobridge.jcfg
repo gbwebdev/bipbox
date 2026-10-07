@@ -1,0 +1,32 @@
+general: {
+	# No admin_key: the spike lets anyone create rooms. Production sets one.
+
+	# IMPORTANT: this is the plugin's OWN range for plain-RTP participants, and
+	# it is completely independent of media.rtp_port_range in janus.jcfg (which
+	# governs ICE/WebRTC media only). Leaving it unset means the plugin default
+	# of 10000+, so the ports you publish in docker-compose.yml would not be the
+	# ones Janus actually binds — and the symptom is silent audio with no error
+	# anywhere. Verified in janus_audiobridge.c: rtp_port_range is read from
+	# this section, default JANUS_AUDIOBRIDGE_DEFAULT_RTP_RANGE_MIN = 10000.
+	rtp_port_range = "10000-10020"
+}
+
+# A static room, so the Pi can join without first creating anything.
+#
+# sampling_rate = 8000 with PCMU participants is the configuration the spike
+# exists to validate: at 8 kHz G.711 the Pi does no codec work at all, because
+# mu-law is a lookup table (voip-options.md).
+room-1000: {
+	description = "Bipbox spike — 8kHz, plain RTP allowed"
+	sampling_rate = 8000
+	record = false
+	allow_rtp_participants = true
+}
+
+# Same room at 16 kHz with Opus, for the comparison run.
+room-1016: {
+	description = "Bipbox spike — 16kHz, plain RTP allowed"
+	sampling_rate = 16000
+	record = false
+	allow_rtp_participants = true
+}
