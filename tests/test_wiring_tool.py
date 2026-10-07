@@ -101,10 +101,52 @@ def test_led_bits_prefer_a_discovered_mapping(tool, tmp_path, monkeypatch):
 
 def test_volume_defaults_are_conservative(tool):
     """A freshly flashed box must never arrive loud (architecture.md §6.3.1)."""
-    assert tool.DEFAULT_VOLUME_PCT == 40
+    assert tool.DEFAULT_VOLUME_PCT == 70  # measured ceiling, 2026-10-07
+    assert tool.DEFAULT_VOLUME_PCT <= tool.VOLUME_WARN_PCT
     assert tool.VOLUME_SWEEP[0] <= 10
     assert max(tool.VOLUME_SWEEP) > tool.VOLUME_WARN_PCT
     assert sorted(tool.VOLUME_SWEEP) == tool.VOLUME_SWEEP
+
+
+def test_telex_is_not_swallowed_by_telegraphy(tool):
+    """Regression: 'telex' and 'telegraphy' collide on a 4-character prefix.
+
+    The original matcher accepted `answer.startswith(name[:4])`, so typing
+    "telex" matched "telegraphy", filed telex's bit under telegraphy, and left
+    telex permanently unmapped — with no error shown.
+    """
+    assert tool.resolve_led_name("telex") == "telex"
+    assert tool.resolve_led_name("telegraphy") == "telegraphy"
+
+
+def test_resolve_led_name_accepts_unambiguous_prefixes(tool):
+    assert tool.resolve_led_name("v") == "voip"
+    assert tool.resolve_led_name("w") == "wifi"
+    assert tool.resolve_led_name("teleg") == "telegraphy"
+
+
+def test_resolve_led_name_rejects_ambiguity_and_nonsense(tool):
+    assert tool.resolve_led_name("tele") is None  # telegraphy vs telex
+    assert tool.resolve_led_name("t") is None
+    assert tool.resolve_led_name("banana") is None
+
+
+def test_resolve_led_name_is_case_and_space_insensitive(tool):
+    assert tool.resolve_led_name("  TeLeX  ") == "telex"
+
+
+def test_capture_window_is_sane(tool):
+    assert 0 < tool.CAPTURE_TARGET_MIN < tool.CAPTURE_TARGET_MAX < 1.0
+    assert sorted(tool.CAPTURE_SWEEP) == tool.CAPTURE_SWEEP
+    assert tool.DEFAULT_CAPTURE_PCT in tool.CAPTURE_SWEEP
+
+
+def test_level_bar_verdicts(tool):
+    assert "SILENT" in tool.level_bar(0.0)
+    assert "weak" in tool.level_bar(0.10)
+    assert "good" in tool.level_bar(0.50)
+    assert "hot" in tool.level_bar(0.92)
+    assert "CLIPPING" in tool.level_bar(1.0)
 
 
 def test_blink_patterns_match_the_specified_timings(tool):

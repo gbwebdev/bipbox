@@ -99,19 +99,33 @@ RCLK needs**. SPI mode 0 (CPOL=0/CPHA=0) shifts data out on the falling clock
 edge while the '595 samples on the rising edge — compatible. One byte per
 update, written only when the byte changes.
 
-Output mapping, shifting MSB-first (so the first bit sent lands on QH):
+Output mapping, shifting MSB-first (so the first bit sent lands on QH). Taken
+from the KiCad netlist, which is authoritative for the resistors but — see
+below — **not** for which LED is which:
 
-| Bit | '595 output | LED |
-|---|---|---|
-| 5 | QF | WiFi (blue, 180 Ω) |
-| 4 | QE | VoIP (green, 300 Ω) |
-| 3 | QD | Telex (green, 300 Ω) |
-| 2 | QC | Telegraphy (orange, 180 Ω) |
-| 0,1,6,7 | QA,QB,QG,QH | unused, held 0 |
+| Bit | '595 output | Series R | Goes to | LED |
+|---|---|---|---|---|
+| 5 | QF | R2, 180 Ω | J5.5 | blue **or** orange |
+| 4 | QE | R3, 300 Ω | J5.4 | one of the two greens |
+| 3 | QD | R4, 300 Ω | J5.3 | the other green |
+| 2 | QC | R5, 180 Ω | J5.2 | orange **or** blue |
+| 0,1,6,7 | QA,QB,QG,QH | — | unconnected | unused, held 0 |
 
-**To verify on first light-up**, since bit order is the classic place to get this
-wrong: write `0b00000100` and confirm only the orange LED lights. The wiring
-tool (§3.5) does this as a guided bit-walk and writes out the discovered map.
+(J5.1 is ground, and J5.6 is the always-on power LED: +5V through R1, 180 Ω,
+with no software involvement.)
+
+**The board cannot tell you which green is telex and which is VoIP.** QD and
+QE are electrically identical — same 300 Ω, adjacent pins on the same
+connector — so the assignment is a property of **how the LED harness was
+crimped**, not of the PCB. The same is true of QC and QF: both 180 Ω, so
+orange-vs-blue is also a harness question, though those two are at least
+distinguishable by eye.
+
+It follows that the mapping **must be discovered per box and stored**, not
+assumed. `context.md`'s "QD = telex, QE = VoIP" was a guess, and on the first
+box built it is the other way round. The bit-walk in §3.5 exists precisely for
+this, and `Device` carries the discovered map so two boxes may legitimately
+differ.
 
 On the chip: you're swapping to **74HCT595N** (F2). Software is unaffected —
 the fix is purely about input thresholds, so develop against the 74HC595N now
@@ -160,6 +174,54 @@ Timings (Q30, with the AP pause removed as you asked):
 
 Note the telegraphy LED is inverted relative to the others: its *steady on* is
 the event, and "all well" is off. That is per spec and intentional.
+
+### 3.4a Known hardware fault: the telegraphy button cannot be read
+
+**Found during bring-up on 2026-10-07: GPIO2 never goes low when the
+telegraphy button is pressed, so the button does nothing.** This is a board
+design fault, not a software one, and it needs a rework.
+
+From the netlist, the button path is:
+
+```
+GPIO2 ──[R9 10k]── node ──[R7 1k]── J1.2 ── switch ── GND
+                     └──[C6 2.2µF]── GND
+```
+
+GPIO2 is one of the two pins carrying a **fixed 1.8 kΩ pull-up to 3V3 on the
+Pi itself** (it is I2C SDA; the pull-up is on the Pi board and cannot be
+disabled). With the button pressed, the pin therefore sits at a divider:
+
+```
+3.3 V × 11 kΩ / (1.8 kΩ + 11 kΩ) ≈ 2.84 V
+```
+
+against a logic-low threshold near 0.9 V. The pin reads **high whether the
+button is pressed or not**. No amount of software fixes this.
+
+**Recommended rework: bridge out R9 and R7** (replace both with wire links or
+0 Ω). GPIO2 then connects straight to the switch, with C6 still across it:
+
+- pressed → 0 V, unambiguously low
+- released → recharges through the 1.8 kΩ pull-up, ≈ 4 ms, so the button is
+  also *faster* than designed
+- C6 still provides the debounce the RC was there for
+
+Rejected alternatives:
+
+- *Bridge only R9*: leaves 1 kΩ against 1.8 kΩ → 1.18 V pressed, still above
+  threshold. Fails.
+- *Move the button to a free GPIO* (GPIO17/22/27 are unconnected on the HAT):
+  works, since the internal ~50 kΩ pull-up gives ≈ 0.6 V pressed — but the
+  release then takes ≈ 110 ms to recharge 2.2 µF through 50 kΩ, which is
+  sluggish for a button whose whole job is immediacy. More invasive and worse.
+
+For the next PCB revision: keep the RC, but put the button on an ordinary GPIO
+and the pull-up resistor on the HAT, rather than relying on a pin whose
+pull-up is fixed at 1.8 kΩ.
+
+GPIO23 (PTT) is unaffected — the netlist confirms it goes to `JP3` and the
+2N7000 drain with no series resistance, and it uses the internal pull-up.
 
 ### 3.5 `wiring_test.py` — standalone hardware bring-up tool
 
@@ -408,9 +470,20 @@ puts a hard ceiling below every user-facing control:
 
 | Setting | Where it acts | Range |
 |---|---|---|
-| `volume_max_pct` | **ALSA hardware mixer** | 0–100%, default from the §3.5 bring-up sweep |
+| `volume_max_pct` | **ALSA playback mixer** | 0–100%, **measured: 70** |
 | `voip_volume_pct` | software gain, VoIP branch | 0–100% **of the ceiling** |
 | `bip_volume_pct` | software gain, bip generator | 0–100% **of the ceiling** |
+| `capture_pct` | **ALSA capture mixer** | 0–100%, set by the §3.5 mic sweep |
+
+**Measured 2026-10-07 on the first box: 70% is the ceiling.** 80% is still
+tolerable but a faint buzz is audible, so 70 is the last clean step and becomes
+the default `volume_max_pct` — replacing the provisional 40.
+
+Capture needs the opposite treatment: the speakermic is a low-output element
+into a cheap USB codec, and at the card's default the recording is nearly
+inaudible. So capture gain is a **setting in its own right**, found by the mic
+sweep (§3.5) and stored per device — there is no useful universal default, and
+the two speakermic variants will not agree.
 
 Why the ceiling lives in the hardware mixer rather than in software gain: the
 mixer is the last stage before the amplifier, so it bounds the analogue output
@@ -430,8 +503,8 @@ Rules:
 - Raising `volume_max_pct` shows a **warning** in the local console naming the
   risk to the speaker, and it is deliberately not exposed in the ordinary volume
   UI. Above 70% the warning is stronger.
-- Boxes ship at `volume_max_pct = 40` until the sweep says otherwise, so a
-  freshly flashed card can never arrive loud.
+- Boxes ship at `volume_max_pct = 70` (the measured ceiling) with the user
+  volume well below it, so a freshly flashed card can never arrive loud.
 - If the sweep concludes that even ~20% is too loud, that is a **hardware**
   answer, not a software one: solder the 47 Ω in parallel with the 22 Ω and
   attenuate there, rather than running the amplifier at the very bottom of its
