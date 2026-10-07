@@ -234,25 +234,43 @@ def test_level_bar_verdicts(tool):
 
 
 def test_blink_patterns_match_the_specified_timings(tool):
-    """Timings as judged on real LEDs, 2026-10-07: the originals read too brief."""
+    """Timings as judged on real LEDs: the originals read too brief and too quick."""
     assert tool.PATTERNS["slow"] == [(550, 550)]
-    assert tool.PATTERNS["fast"] == [(125, 125)]
-    assert tool.PATTERNS["heartbeat"] == [(130, 1970)]
+    assert tool.PATTERNS["fast"] == [(175, 175)]
+    assert tool.PATTERNS["heartbeat"] == [(200, 2800)]
     # ". . _" repeating, with no trailing pause (Q30).
     assert tool.PATTERNS["ap"] == [(200, 200), (200, 200), (500, 200)]
 
 
-def test_heartbeat_blink_is_brief_against_a_long_gap(tool):
-    """'A quick blink every 2 seconds' — the gap must dominate, or it reads as slow blink."""
+def test_heartbeat_is_a_brief_blink_on_a_three_second_cycle(tool):
     on, off = tool.PATTERNS["heartbeat"][0]
+    assert on + off == 3000
+    # The gap must dominate, or it stops reading as a heartbeat and becomes
+    # just another slow blink.
     assert off > 10 * on
-    assert 2000 <= on + off <= 2200
 
 
-def test_fast_is_clearly_faster_than_slow(tool):
-    fast_on = tool.PATTERNS["fast"][0][0]
-    slow_on = tool.PATTERNS["slow"][0][0]
-    assert slow_on > 3 * fast_on
+def test_fast_stays_distinguishable_from_slow(tool):
+    """They appear on the same lamp at different times, so the ratio must hold.
+
+    Fast has been lengthened twice; this guards the point where another
+    adjustment would make the two patterns hard to tell apart.
+    """
+    fast_period = sum(tool.PATTERNS["fast"][0])
+    slow_period = sum(tool.PATTERNS["slow"][0])
+    assert slow_period >= 2.5 * fast_period
+
+
+def test_every_timing_is_a_multiple_of_the_led_tick(tool):
+    """The LED controller ticks at 25 ms (architecture.md §3.4).
+
+    Timings that are not multiples of the tick get quantised, so a pattern
+    would not run at the duration written here.
+    """
+    for name, phases in tool.PATTERNS.items():
+        for on, off in phases:
+            assert on % 25 == 0, f"{name}: on={on}"
+            assert off % 25 == 0, f"{name}: off={off}"
 
 
 def test_tone_frequency_is_recoverable(tool, tmp_path):

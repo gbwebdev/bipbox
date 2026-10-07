@@ -149,9 +149,14 @@ dedicated, 50 ms shared), rather than assuming they're interchangeable.
 
 ### 3.4 LED state machine
 
-One `LedController` task ticking at 50 Hz (20 ms), ample for the fastest 80 ms
-pattern. Each LED resolves to a pattern from (service state) with (activity)
-overriding it while active, per Q31.
+One `LedController` task ticking at **40 Hz (25 ms)**. Each LED resolves to a
+pattern from (service state) with (activity) overriding it while active, per
+Q31.
+
+The tick is 25 ms rather than 20 because **every timing below is a multiple of
+25 ms**, so each phase runs at exactly its written duration. At a 20 ms tick,
+175 ms and 550 ms would quantise to 180 and 560, and a pattern would not be
+what the table says. A test enforces the alignment.
 
 Timings (Q30, with the AP pause removed as you asked):
 
@@ -159,17 +164,23 @@ Timings (Q30, with the AP pause removed as you asked):
 |---|---|
 | `off` / `on` | steady |
 | `slow` | 550 ms on / 550 ms off |
-| `fast` | 125 ms on / 125 ms off |
-| `heartbeat` | 130 ms on / 1970 ms off |
+| `fast` | 175 ms on / 175 ms off |
+| `heartbeat` | 200 ms on / 2800 ms off — a **3 s** cycle |
 | `ap` | 200 on, 200 off, 200 on, 200 off, 500 on, 200 off — repeating, no pause |
 | `flash` | 50 ms per event, held visible ≥ 150 ms |
 
-**Revised 2026-10-07 after judging them on the real LEDs**, which is why the
-pattern preview exists: `fast` gained 25 ms on each phase and every other
-pattern gained 50 ms on each phase. The originals read as too brief through
-the panel. Note this puts the heartbeat period at 2.1 s rather than exactly
-2 s — imperceptible for a "blink every couple of seconds", but say so if you
-want 1920 ms kept as the gap.
+**Tuned on the real LEDs over two passes**, which is why the pattern preview
+exists — every one of these read too brief or too quick on paper:
+
+- `fast` went 100 → 125 → **175 ms** per phase. It is now 2.9 Hz against
+  `slow`'s 0.9 Hz, a 3.1× ratio. **That ratio is the constraint**: both appear
+  on the *same* lamp at different times (telex `slow` = connecting,
+  `fast` = receiving), so they must stay tellable apart. Lengthening `fast`
+  again means lengthening `slow` too; a test guards the margin.
+- `heartbeat` went 80/1920 → 130/1970 → **200/2800**, a deliberate 3 s cycle.
+  Proportional scaling suggested 186/2814; rounded to 200/2800 for round
+  numbers, an exact 3.000 s period, and a visibly longer flash. The 14× gap
+  ratio keeps it reading as a heartbeat rather than a slow blink.
 
 | LED | off | slow | fast | on | heartbeat |
 |---|---|---|---|---|---|

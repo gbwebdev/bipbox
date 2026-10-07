@@ -87,8 +87,8 @@ GAIN_SWEEP = [1, 2, 3, 4, 6, 8]
 # Blink patterns from architecture.md §3.4, as (on_ms, off_ms) sequences.
 PATTERNS = {
     "slow": [(550, 550)],
-    "fast": [(125, 125)],
-    "heartbeat": [(130, 1970)],
+    "fast": [(175, 175)],
+    "heartbeat": [(200, 2800)],
     "ap": [(200, 200), (200, 200), (500, 200)],
 }
 
