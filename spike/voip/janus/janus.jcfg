@@ -1,0 +1,30 @@
+general: {
+	configs_folder = "/opt/janus/etc/janus"
+	plugins_folder = "/opt/janus/lib/janus/plugins"
+	transports_folder = "/opt/janus/lib/janus/transports"
+	debug_level = 4
+	server_name = "bipbox-voip-spike"
+}
+
+certificates: {
+	cert_pem = "/opt/janus/share/janus/certs/mycert.pem"
+	cert_key = "/opt/janus/share/janus/certs/mycert.key"
+}
+
+media: {
+	rtp_port_range = "20000-20020"
+}
+
+nat: {
+	ice_lite = false
+	ice_tcp = false
+
+	# Production pins candidate gathering to the WireGuard interface so the
+	# public IP can never appear in an SDP (architecture.md §6.4). Irrelevant
+	# here: the spike has no WebRTC participants at all.
+	# ice_enforce_list = "wg0"
+}
+
+events: {
+	broadcast = false
+}
