@@ -538,30 +538,40 @@ sound card speaker out (J3.3) ──[R11 22Ω]── J4.4 (TRRS tip) ── spea
 R11 in series with a low-impedance speaker is a voltage divider, and it throws
 away most of the signal:
 
-| Speaker | With R12 fitted | R12 removed | R12 removed, R11 = 10 Ω | R11 = 4.7 Ω |
-|---|---|---|---|---|
-| 8 Ω | −12.5 dB | −11.5 dB | −7.0 dB | −4.0 dB |
-| 16 Ω | −9.1 dB | −7.5 dB | −4.2 dB | −2.2 dB |
-| 32 Ω | −6.7 dB | −4.5 dB | −2.4 dB | −1.3 dB |
+Attenuation, with R12 fitted, against the series resistor:
+
+| Speaker | R11 = 22 Ω (as designed) | R11 = 10 Ω | **R11 = 3.3 Ω (as built)** |
+|---|---|---|---|
+| 8 Ω | −12.5 dB | −7.0 dB | **−3.4 dB** |
+| 16 Ω | −9.1 dB | −4.2 dB | **−2.1 dB** |
+| 32 Ω | −6.7 dB | −2.4 dB | **−1.4 dB** |
 
 Two conclusions:
 
-1. **R12 is barely the problem.** As a shunt to ground it costs only 1–2 dB.
-   Removing it is nearly free but nearly pointless.
-2. **R11 = 22 Ω is the problem.** Dropping it to 10 Ω buys about 4.5 dB and
-   still leaves the codec a sane ≈ 18 Ω load; 4.7 Ω buys ~8 dB. Shorting it
-   entirely asks a headphone-class output to drive 8 Ω directly, which will
-   distort before it gets loud.
+1. **R12 is barely the problem.** As a shunt to ground it costs 1–2 dB at
+   22 Ω and only ~0.4 dB at 3.3 Ω. Removing it is pointless; leave it fitted.
+2. **R11 was the problem.** **Box A was reworked to 3.3 Ω on 2026-10-07**,
+   worth about +9 dB into 8 Ω, +7 dB into 16 Ω.
 
-**This also corrects the rationale in §6.3.1.** The faint buzz at 80% is the
-codec running out of clean output, not the speaker struggling — with 12 dB of
-resistive attenuation in front of it the speaker receives roughly 25 mW, far
-inside its rating. So `volume_max_pct` is an **amplifier-headroom** limit, not
-speaker protection. The ceiling model stands; the reason for it was wrong.
+**This also corrects the rationale in §6.3.1.** The faint buzz at 80% was the
+codec running out of clean output, not the speaker struggling — the speaker
+receives tens of milliwatts, far inside its rating. So `volume_max_pct` is an
+**amplifier-headroom** limit, not speaker protection. The ceiling model stands;
+the reason for it was wrong.
 
-Before changing R11, **measure the speakermic's speaker** (DC resistance
-across tip and sleeve, ≈ 0.8 × nominal impedance), since the table above swings
-by 6 dB across plausible values.
+#### The ceiling must be re-measured after an R11 change
+
+At 3.3 Ω the codec sees roughly a **10 Ω load instead of ~30 Ω**, well below
+what a headphone-class output is specified for (16–32 Ω). It will current-limit
+and distort *earlier* in the volume range than before, so **the measured 70%
+ceiling is stale and probably too high now** — re-run `--volume-sweep`. The
+limit remains audible distortion rather than damage, so finding it by ear is
+both safe and the only sensible method.
+
+Side effect worth knowing: 3.3 Ω offers little protection if the TRRS plug
+shorts tip to sleeve on insertion. Headphone outputs are generally
+short-tolerant and the event is momentary, so this is accepted rather than
+designed around.
 
 ### 6.4 Browser media — selectable transport mode
 
