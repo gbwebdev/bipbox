@@ -55,8 +55,9 @@ You can find the schematics, PCB, etc. in [./CAD/KiCAD](./CAD/KiCAD).
 * LEDs:
   * The 74HC595N (SRCLK on Pi’s SPIO.SCLK/GPIO11, SER on SPIO.MOSI/GPIO10, RCLK on SPIO.CE1/SPIO7, SRCLR on 5V and OE on ground) drives:
     * The telegraphy LED (through a 180 ohm resistor, QC)
-    * The telex green LED (through a 300 ohm resistor, QD)
-    * The VoIP green LED (through a 300 ohm resistor, QE)
+    * The VoIP green LED (through a 300 ohm resistor, QD)
+    * The telex green LED (through a 300 ohm resistor, QE)
+      (NOTE: QD vs QE is set by how the LED harness was crimped, not by the PCB -- both are 300 ohm into adjacent pins of J5. Measured on box A; discover per box.)
     * The Wi-Fi blue LED (through a 180 ohm resistor, QF)
   * The power LED is directly connected to the 5V power line through a 180 ohm resistor.
   * The low-current green LED is connected to GPIO26 through a 1k resistor

@@ -99,19 +99,44 @@ RCLK needs**. SPI mode 0 (CPOL=0/CPHA=0) shifts data out on the falling clock
 edge while the '595 samples on the rising edge — compatible. One byte per
 update, written only when the byte changes.
 
-Output mapping, shifting MSB-first (so the first bit sent lands on QH):
+Output mapping, shifting MSB-first (so the first bit sent lands on QH). Taken
+from the KiCad netlist, which is authoritative for the resistors but — see
+below — **not** for which LED is which:
 
-| Bit | '595 output | LED |
-|---|---|---|
-| 5 | QF | WiFi (blue, 180 Ω) |
-| 4 | QE | VoIP (green, 300 Ω) |
-| 3 | QD | Telex (green, 300 Ω) |
-| 2 | QC | Telegraphy (orange, 180 Ω) |
-| 0,1,6,7 | QA,QB,QG,QH | unused, held 0 |
+| Bit | '595 output | Series R | Goes to | LED |
+|---|---|---|---|---|
+| 5 | QF | R2, 180 Ω | J5.5 | blue **or** orange |
+| 4 | QE | R3, 300 Ω | J5.4 | one of the two greens |
+| 3 | QD | R4, 300 Ω | J5.3 | the other green |
+| 2 | QC | R5, 180 Ω | J5.2 | orange **or** blue |
+| 0,1,6,7 | QA,QB,QG,QH | — | unconnected | unused, held 0 |
 
-**To verify on first light-up**, since bit order is the classic place to get this
-wrong: write `0b00000100` and confirm only the orange LED lights. The wiring
-tool (§3.5) does this as a guided bit-walk and writes out the discovered map.
+(J5.1 is ground, and J5.6 is the always-on power LED: +5V through R1, 180 Ω,
+with no software involvement.)
+
+**The board cannot tell you which green is telex and which is VoIP.** QD and
+QE are electrically identical — same 300 Ω, adjacent pins on the same
+connector — so the assignment is a property of **how the LED harness was
+crimped**, not of the PCB. The same is true of QC and QF: both 180 Ω, so
+orange-vs-blue is also a harness question, though those two are at least
+distinguishable by eye.
+
+It follows that the mapping **must be discovered per box and stored**, not
+assumed. The bit-walk in §3.5 exists precisely for this, and two boxes may
+legitimately differ.
+
+**Measured on box A (2026-10-07), confirming the prediction:**
+
+| Bit | Output | LED | vs. `context.md` |
+|---|---|---|---|
+| 2 | QC | telegraphy (orange) | as assumed |
+| 3 | QD | **VoIP** (green) | **swapped** |
+| 4 | QE | **telex** (green) | **swapped** |
+| 5 | QF | WiFi (blue) | as assumed |
+
+The two 180 Ω positions (QC/QF) came out as guessed; the two identical 300 Ω
+positions (QD/QE) came out reversed — exactly where the board carries no
+information. `context.md` should be corrected to drop the claim.
 
 On the chip: you're swapping to **74HCT595N** (F2). Software is unaffected —
 the fix is purely about input thresholds, so develop against the 74HC595N now
@@ -135,20 +160,38 @@ dedicated, 50 ms shared), rather than assuming they're interchangeable.
 
 ### 3.4 LED state machine
 
-One `LedController` task ticking at 50 Hz (20 ms), ample for the fastest 80 ms
-pattern. Each LED resolves to a pattern from (service state) with (activity)
-overriding it while active, per Q31.
+One `LedController` task ticking at **40 Hz (25 ms)**. Each LED resolves to a
+pattern from (service state) with (activity) overriding it while active, per
+Q31.
+
+The tick is 25 ms rather than 20 because **every timing below is a multiple of
+25 ms**, so each phase runs at exactly its written duration. At a 20 ms tick,
+175 ms and 550 ms would quantise to 180 and 560, and a pattern would not be
+what the table says. A test enforces the alignment.
 
 Timings (Q30, with the AP pause removed as you asked):
 
 | Pattern | Definition |
 |---|---|
 | `off` / `on` | steady |
-| `slow` | 500 ms on / 500 ms off |
-| `fast` | 100 ms on / 100 ms off |
-| `heartbeat` | 80 ms on / 1920 ms off |
-| `ap` | 150 on, 150 off, 150 on, 150 off, 450 on, 150 off — repeating, no pause |
+| `slow` | 550 ms on / 550 ms off |
+| `fast` | 175 ms on / 175 ms off |
+| `heartbeat` | 200 ms on / 2800 ms off — a **3 s** cycle |
+| `ap` | 200 on, 200 off, 200 on, 200 off, 500 on, 200 off — repeating, no pause |
 | `flash` | 50 ms per event, held visible ≥ 150 ms |
+
+**Tuned on the real LEDs over two passes**, which is why the pattern preview
+exists — every one of these read too brief or too quick on paper:
+
+- `fast` went 100 → 125 → **175 ms** per phase. It is now 2.9 Hz against
+  `slow`'s 0.9 Hz, a 3.1× ratio. **That ratio is the constraint**: both appear
+  on the *same* lamp at different times (telex `slow` = connecting,
+  `fast` = receiving), so they must stay tellable apart. Lengthening `fast`
+  again means lengthening `slow` too; a test guards the margin.
+- `heartbeat` went 80/1920 → 130/1970 → **200/2800**, a deliberate 3 s cycle.
+  Proportional scaling suggested 186/2814; rounded to 200/2800 for round
+  numbers, an exact 3.000 s period, and a visibly longer flash. The 14× gap
+  ratio keeps it reading as a heartbeat rather than a slow blink.
 
 | LED | off | slow | fast | on | heartbeat |
 |---|---|---|---|---|---|
@@ -160,6 +203,54 @@ Timings (Q30, with the AP pause removed as you asked):
 
 Note the telegraphy LED is inverted relative to the others: its *steady on* is
 the event, and "all well" is off. That is per spec and intentional.
+
+### 3.4a Known hardware fault: the telegraphy button cannot be read
+
+**Found during bring-up on 2026-10-07: GPIO2 never goes low when the
+telegraphy button is pressed, so the button does nothing.** This is a board
+design fault, not a software one, and it needs a rework.
+
+From the netlist, the button path is:
+
+```
+GPIO2 ──[R9 10k]── node ──[R7 1k]── J1.2 ── switch ── GND
+                     └──[C6 2.2µF]── GND
+```
+
+GPIO2 is one of the two pins carrying a **fixed 1.8 kΩ pull-up to 3V3 on the
+Pi itself** (it is I2C SDA; the pull-up is on the Pi board and cannot be
+disabled). With the button pressed, the pin therefore sits at a divider:
+
+```
+3.3 V × 11 kΩ / (1.8 kΩ + 11 kΩ) ≈ 2.84 V
+```
+
+against a logic-low threshold near 0.9 V. The pin reads **high whether the
+button is pressed or not**. No amount of software fixes this.
+
+**Recommended rework: bridge out R9 and R7** (replace both with wire links or
+0 Ω). GPIO2 then connects straight to the switch, with C6 still across it:
+
+- pressed → 0 V, unambiguously low
+- released → recharges through the 1.8 kΩ pull-up, ≈ 4 ms, so the button is
+  also *faster* than designed
+- C6 still provides the debounce the RC was there for
+
+Rejected alternatives:
+
+- *Bridge only R9*: leaves 1 kΩ against 1.8 kΩ → 1.18 V pressed, still above
+  threshold. Fails.
+- *Move the button to a free GPIO* (GPIO17/22/27 are unconnected on the HAT):
+  works, since the internal ~50 kΩ pull-up gives ≈ 0.6 V pressed — but the
+  release then takes ≈ 110 ms to recharge 2.2 µF through 50 kΩ, which is
+  sluggish for a button whose whole job is immediacy. More invasive and worse.
+
+For the next PCB revision: keep the RC, but put the button on an ordinary GPIO
+and the pull-up resistor on the HAT, rather than relying on a pin whose
+pull-up is fixed at 1.8 kΩ.
+
+GPIO23 (PTT) is unaffected — the netlist confirms it goes to `JP3` and the
+2N7000 drain with no series resistance, and it uses the internal pull-up.
 
 ### 3.5 `wiring_test.py` — standalone hardware bring-up tool
 
@@ -193,6 +284,39 @@ What it does:
 - **Printer** — detect and print a test ticket.
 - **`--selftest`** — runs everything in sequence with a PASS/FAIL summary.
 
+### 3.6 Box A calibration — the bring-up result
+
+Bring-up finished 2026-10-07. The tool's `wiring_test.json` is not a scratch
+file: **it is the calibration for that box**, and the daemon reads the same
+values from `/etc/bipbox/calibration.json` (seeded from it by the installer).
+Nothing here is derivable from the schematic, so it cannot be recreated by
+inspection — only by walking the hardware again.
+
+```json
+{
+  "led_bits":        { "telegraphy": 2, "voip": 3, "telex": 4, "wifi": 5 },
+  "mixer_control":   "Speaker",
+  "volume_max_pct":  90,
+  "playback_gain":   4,
+  "capture_control": "Mic",
+  "capture_pct":     60
+}
+```
+
+| Value | Note |
+|---|---|
+| `led_bits` | QD/QE reversed from the guess (§3.2). Per-box. |
+| `mixer_control` / `capture_control` | This UGREEN card exposes **`Speaker`** and **`Mic`**, not `PCM`. The daemon must use the *saved* names rather than re-probing, so a card swap is a deliberate recalibration. |
+| `volume_max_pct` 90 | Chosen knowingly above the 75% caution point: walkie-talkie distortion is acceptable here, and the speaker is in no danger (§6.3.2). |
+| `playback_gain` ×4 | Validates §6.3.3 — spending crest factor is what made speech audible. |
+| `capture_pct` 60 | **Lower than the 80 I had assumed.** The mic was never weak; it was simply that no capture control was being set at all. Above 60 it clipped. |
+
+**Longevity note, not a warning:** 90% mixer plus ×4 clipped gain means the
+codec is driven near full scale into a ~12 Ω load whenever VoIP is active —
+the hardest configuration for it. That is an informed trade for loudness, and
+the sound card is a cheap, socketed, replaceable part. If one ever fails, this
+is the first thing to look at rather than a mystery.
+
 ---
 
 ## 4. Data model
@@ -206,6 +330,10 @@ Device(uuid PK, channel_id FK, alias, secret_hash,
        paper_cols=42, paper_dots=576, printer_info, ptt_wiring,
        wg_pubkey, wg_ip, fw_version,
        last_seen, ip_address, mac_address, enabled, created_at)
+# Hardware calibration (§3.6) deliberately does NOT live here: LED bit order,
+# mixer control names and gain settings are properties of one physical box and
+# its harness, useless to the server, and needed before the box can even reach
+# it. They stay in /etc/bipbox/calibration.json on the device.
 
 Account(id, login UNIQUE, display_name, password_hash,
         totp_secret, is_admin, enabled, created_at, last_login)
@@ -419,9 +547,21 @@ puts a hard ceiling below every user-facing control:
 
 | Setting | Where it acts | Range |
 |---|---|---|
-| `volume_max_pct` | **ALSA hardware mixer** | 0–100%, default from the §3.5 bring-up sweep |
+| `volume_max_pct` | **ALSA playback mixer** | 0–100%, **measured: 70** |
 | `voip_volume_pct` | software gain, VoIP branch | 0–100% **of the ceiling** |
 | `bip_volume_pct` | software gain, bip generator | 0–100% **of the ceiling** |
+| `capture_pct` | **ALSA capture mixer** | 0–100%, set by the §3.5 mic sweep |
+| `voice_gain` | software gain + hard limiter, playback | ×1–×8, user-facing (§6.3.3) |
+
+**Measured 2026-10-07 on the first box: 70% is the ceiling.** 80% is still
+tolerable but a faint buzz is audible, so 70 is the last clean step and becomes
+the default `volume_max_pct` — replacing the provisional 40.
+
+Capture needs the opposite treatment: the speakermic is a low-output element
+into a cheap USB codec, and at the card's default the recording is nearly
+inaudible. So capture gain is a **setting in its own right**, found by the mic
+sweep (§3.5) and stored per device — there is no useful universal default, and
+the two speakermic variants will not agree.
 
 Why the ceiling lives in the hardware mixer rather than in software gain: the
 mixer is the last stage before the amplifier, so it bounds the analogue output
@@ -438,11 +578,16 @@ Rules:
   change, so nothing else drifts it. ALSA state is also saved across reboots.
 - The mapped (perceptual) ALSA scale is used — `amixer -M` — so a percentage
   behaves like a percentage on a slider rather than like a register value.
-- Raising `volume_max_pct` shows a **warning** in the local console naming the
-  risk to the speaker, and it is deliberately not exposed in the ordinary volume
-  UI. Above 70% the warning is stronger.
-- Boxes ship at `volume_max_pct = 40` until the sweep says otherwise, so a
-  freshly flashed card can never arrive loud.
+- **Both the output volume and the mic gain are user-facing** in the local
+  console, side by side, because in practice neither has a setting that works
+  untouched: the output is quiet (see §6.3.2) and the two speakermic variants
+  need different capture gains. The mic gain control carries a **live level
+  meter** — a gain slider without one is guesswork, and the same healthy
+  window the bring-up sweep uses (25–85% peak) is drawn on it.
+- Raising `volume_max_pct` shows a **warning** in the local console, and it sits
+  in an advanced section rather than beside the everyday volume control.
+- Boxes ship at `volume_max_pct = 70` (the measured ceiling) with the user
+  volume well below it, so a freshly flashed card can never arrive loud.
 - If the sweep concludes that even ~20% is too loud, that is a **hardware**
   answer, not a software one: solder the 47 Ω in parallel with the 22 Ω and
   attenuate there, rather than running the amplifier at the very bottom of its
@@ -450,6 +595,103 @@ Rules:
 
 The same ceiling applies to the test tone and the printer-less startup beep —
 there is no code path to the speaker that bypasses it.
+
+### 6.3.2 Why playback is quiet, and why it is a hardware fix
+
+**Found 2026-10-07: playback is too quiet even at the 70% ceiling, and the
+cause is resistive, not software.** From the netlist, the output chain is:
+
+```
+sound card speaker out (J3.3) ──[R11 22Ω]── J4.4 (TRRS tip) ── speaker
+                                     └──[R12 47Ω]── GND
+```
+
+R11 in series with a low-impedance speaker is a voltage divider, and it throws
+away most of the signal:
+
+**The schematic's 22 Ω for R11 is stale: the boards are built with 3.3 Ω**, and
+have been throughout testing. The measured speaker is **8.6 Ω**. So the real
+numbers are:
+
+| Stage | Value |
+|---|---|
+| Attenuation, R11 = 3.3 Ω into 8.6 Ω (R12 fitted) | **−3.3 dB** |
+| Same with R12 removed | −2.8 dB (so removing it gains 0.5 dB — pointless) |
+| Maximum possible gain left, shorting R11 | +3.3 dB |
+
+**There is therefore no meaningful hardware gain left on this path, and no
+software gain either** — the mixer cannot exceed 0 dBFS without clipping. The
+output is quiet because **the USB codec cannot drive this load any louder**: a
+headphone-class output into ~12 Ω runs at or past its current limit. If louder
+is genuinely required, the honest answer is a small amplifier module
+(PAM8302-class) between the card and the speaker, not another resistor.
+
+Action: **`CAD/` should be updated so the schematic says 3.3 Ω**, since it is
+published for others to build from.
+
+#### What is actually at risk
+
+| Part | Risk | Why |
+|---|---|---|
+| **Speaker** (8.6 Ω) | **None** | It receives tens of milliwatts against a rating of several hundred — roughly 2–3% of capacity. It cannot be damaged by anything this card can produce. |
+| **USB sound card** | **The real one** | It is driving ~12 Ω where 16–32 Ω is specified. Codecs of this class current-limit rather than fail, but sustained overdrive means sustained heat in the output stage. |
+
+So `volume_max_pct` protects the **card**, not the speaker — and the right
+setting is simply *below where distortion starts*, because audible distortion
+is the symptom of the card being pushed past its limit. The 70% you measured is
+already that number, arrived at for the wrong stated reason. **This corrects the
+rationale in §6.3.1**; the ceiling model itself stands.
+
+Practically: you can set the user volume anywhere up to the ceiling without
+worrying about the speaker, and the ceiling is a card-longevity setting rather
+than a safety interlock.
+
+### 6.3.3 Making speech carry: crest factor, not volume
+
+**Observed 2026-10-07: the test tone is comfortably loud while recorded speech
+has to be strained for — at the same mixer setting.** That is not a fault, and
+no volume control fixes it. It is crest factor:
+
+| Signal | Peak | RMS | Crest |
+|---|---|---|---|
+| Sine (the test tone) | 0 dBFS | −3 dB | **~3 dB** |
+| Speech | 0 dBFS | −14 to −20 dB | **14–20 dB** |
+
+Loudness follows RMS, not peak. Normalised to the same peak, speech carries
+**10–17 dB less average power** than a tone. The chain is behaving correctly;
+speech simply uses its headroom for transients instead of loudness.
+
+Since quality is explicitly not a goal here — the device imitates a walkie-talkie,
+and those are not prized for fidelity — the right move is to **spend that crest
+factor deliberately**, which is exactly what handheld radios and amateur-radio
+speech processors do.
+
+**Design: a `voice_gain` stage on the playback branch**, user-adjustable
+alongside the volume (§6.3.1), applying digital make-up gain followed by a hard
+limiter. Clipping is the intended effect, not a side effect.
+
+Measured expectation, so this is not oversold: on a synthetic 10 dB-crest
+signal, hard clipping alone bought **+2.6 dB at ×2 and +3.9 dB at ×8** — real,
+but bounded and sharply diminishing, because clipping only flattens peaks. Real
+speech at 14–18 dB crest has more to give, but the honest ceiling for
+clipping alone is a handful of dB.
+
+**To go further, compress rather than clip** — raising the quiet parts gains far
+more RMS per dB of peak than squashing the loud ones. In the GStreamer pipeline
+(§6.2), in increasing order of cost:
+
+| Stage | Element | Notes |
+|---|---|---|
+| Make-up gain + limiter | `audioamplify amplification=N clipping-method=clip` | Cheapest; `clipping-method` must be `clip`, since the default wraps and would sound catastrophic |
+| Compressor | `audiodynamic mode=compressor characteristics=soft-knee` | `gstreamer1.0-plugins-good`, modest cost, the real win |
+| Voice AGC | `webrtcdsp gain-control=true` | Purpose-built for speech, but `plugins-bad` and the heaviest on ARMv6 — measure before adopting |
+
+Start with gain + limiter because it is nearly free, add `audiodynamic` if that
+is not enough, and treat `webrtcdsp` as a last resort on this CPU.
+
+The bring-up tool exposes this as `--gain-sweep`: it records three seconds,
+reports peak/RMS/crest, then replays at ×1 to ×8 showing what fraction of
+samples clip at each step, and stores the chosen `playback_gain`.
 
 ### 6.4 Browser media — selectable transport mode
 

@@ -13,12 +13,17 @@ audio shells out to aplay/arecord.
 Requires in /boot/firmware/config.txt:  dtparam=spi=on
 
 Usage:
-    sudo python3 wiring_test.py            interactive menu
-    sudo python3 wiring_test.py --selftest  run everything, print a summary
-    sudo python3 wiring_test.py --leds      LED tests only
-    sudo python3 wiring_test.py --buttons   button monitor only
-    sudo python3 wiring_test.py --audio     audio test only
-    sudo python3 wiring_test.py --printer   printer test only
+    sudo python3 wiring_test.py                interactive menu
+    sudo python3 wiring_test.py --selftest     run everything, print a summary
+    sudo python3 wiring_test.py --leds         LED tests only
+    sudo python3 wiring_test.py --buttons      button monitor only
+    sudo python3 wiring_test.py --buttons --pin 17 --pin 27
+                                               monitor arbitrary GPIOs
+    sudo python3 wiring_test.py --audio        audio test only
+    sudo python3 wiring_test.py --volume-sweep find the safe speaker ceiling
+    sudo python3 wiring_test.py --mic-sweep    find a usable capture gain
+    sudo python3 wiring_test.py --gain-sweep   find a voice gain (louder, clipped)
+    sudo python3 wiring_test.py --printer      printer test only
 """
 
 import argparse
@@ -36,32 +41,60 @@ from pathlib import Path
 
 STATE_FILE = Path(__file__).with_name("wiring_test.json")
 
-# Assumed 74HC(T)595 bit → LED mapping, shifting MSB-first so the first bit sent
-# lands on QH. Overridden by whatever the bit-walk discovers.
+# 74HC(T)595 bit → LED mapping, shifting MSB-first so the first bit sent lands
+# on QH. These are the values MEASURED on box A, not a guess -- but the two
+# greens are an artefact of how the harness was crimped, not of the PCB (QD and
+# QE are both 300R into adjacent pins of J5), so every box must still be walked
+# and may legitimately differ. See architecture.md 3.2.
 DEFAULT_LED_BITS = {
     "telegraphy": 2,  # QC, orange, 180R
-    "telex": 3,  # QD, green, 300R
-    "voip": 4,  # QE, green, 300R
+    "voip": 3,  # QD, green, 300R
+    "telex": 4,  # QE, green, 300R
     "wifi": 5,  # QF, blue, 180R
 }
 
 PIN_TELEGRAPHY = 2
 PIN_PTT = 23
 
-# Speaker protection. The shoulder speakermic holds a small, cheap driver behind
-# a 22R series resistor; sustained level is what kills it, so every test starts
-# conservative and never jumps to full scale.
-DEFAULT_VOLUME_PCT = 40
-VOLUME_WARN_PCT = 70
-VOLUME_SWEEP = [10, 20, 30, 40, 50, 60, 70, 80]
+# How long a level must hold before it is accepted as a real change. The HAT's
+# RC network already debounces in hardware, so this only has to reject chatter
+# -- and it must stay small, because it is also the shortest press that can be
+# seen at all.
+ACCEPT_MS = 2
+
+# Output level. The series resistor is 3.3R (not the 22R the schematic shows),
+# into an 8.6R driver, so there is only ~3dB of attenuation: the speaker receives
+# tens of milliwatts and is in no danger. What the ceiling protects is the USB
+# codec, which is driving a load well below its rating and distorts when pushed.
+# Box A ended up at 90% with a x4 voice gain, having decided that walkie-talkie
+# distortion is acceptable; 70 stays the shipped default so a fresh card is not
+# startling (architecture.md 6.3.2).
+DEFAULT_VOLUME_PCT = 70
+VOLUME_WARN_PCT = 75  # above the measured-clean point, so 80+ asks first
+VOLUME_SWEEP = [10, 20, 30, 40, 50, 60, 70, 80, 90]
 MIXER_CANDIDATES = ("PCM", "Speaker", "Headphone", "Master", "Playback")
+
+# Capture: the speakermic is a low-output dynamic element into a cheap USB
+# codec, so it needs real gain rather than the card's default.
+CAPTURE_CANDIDATES = ("Mic", "Capture", "Microphone", "Front Mic", "Internal Mic")
+DEFAULT_CAPTURE_PCT = 60  # measured on box A; above this the mic clipped
+CAPTURE_SWEEP = [40, 60, 70, 80, 90, 100]
+# Healthy speech peaks. Below the floor it is inaudible; above the ceiling it
+# clips, and clipping into a mono comms mic sounds far worse than it measures.
+CAPTURE_TARGET_MIN = 0.25
+CAPTURE_TARGET_MAX = 0.85
+
+# Digital make-up gain applied after the mixer, hard-clipped. The mixer is
+# already at its useful limit, so the only way left to make speech carry is to
+# spend its crest factor -- which is what a handheld radio does.
+GAIN_SWEEP = [1, 2, 3, 4, 6, 8]
 
 # Blink patterns from architecture.md §3.4, as (on_ms, off_ms) sequences.
 PATTERNS = {
-    "slow": [(500, 500)],
-    "fast": [(100, 100)],
-    "heartbeat": [(80, 1920)],
-    "ap": [(150, 150), (150, 150), (450, 150)],
+    "slow": [(550, 550)],
+    "fast": [(175, 175)],
+    "heartbeat": [(200, 2800)],
+    "ap": [(200, 200), (200, 200), (500, 200)],
 }
 
 
@@ -130,6 +163,24 @@ def load_led_bits():
     return dict(DEFAULT_LED_BITS)
 
 
+def resolve_led_name(answer):
+    """Map typed input to one LED name, exactly or by unambiguous prefix.
+
+    Naive prefix matching is a trap here: "telex" is a prefix-collision with
+    "telegraphy" on the first four characters, so a loose match silently files
+    telex's bit under telegraphy and never records telex at all.
+    """
+    answer = answer.strip().lower()
+    if answer in DEFAULT_LED_BITS:
+        return answer
+    matches = [name for name in DEFAULT_LED_BITS if name.startswith(answer)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"    ({answer!r} is ambiguous: {', '.join(matches)} — type more)")
+    return None
+
+
 def run_led_walk(leds):
     """Light each '595 output in turn and record which LED actually lit."""
     print("\n── LED bit-walk ─────────────────────────────────────────────────")
@@ -144,12 +195,11 @@ def run_led_walk(leds):
         leds.all_off()
         if answer in ("", "none", "n"):
             continue
-        for name in DEFAULT_LED_BITS:
-            if name.startswith(answer) or answer.startswith(name[:4]):
-                discovered[name] = bit
-                break
+        name = resolve_led_name(answer)
+        if name is None:
+            print(f"    (unrecognised: {answer!r}, ignored — bit {bit} left unmapped)")
         else:
-            print(f"    (unrecognised: {answer!r}, ignored)")
+            discovered[name] = bit
 
     if not discovered:
         print("\n  No LEDs identified. Check the '595 power rail, SRCLR (→5V),")
@@ -175,9 +225,23 @@ def run_led_walk(leds):
 
 
 def run_led_named(leds):
+    # Re-read the mapping on entry, so hand-editing wiring_test.json takes
+    # effect without restarting the tool — it is loaded once at construction.
+    leds.bits = load_led_bits()
+
     print("\n── LED by name ──────────────────────────────────────────────────")
-    print("Commands: <name> on | <name> off | all | none | q")
-    print(f"Names: {', '.join(leds.bits)}\n")
+    print("Commands:")
+    print("  <name> on|off     by name, using the mapping below")
+    print("  bit <0-7> on|off  by raw shift-register bit, ignoring all names")
+    print("  all | none | map | reload | q")
+    print(
+        "\n  Current mapping (from "
+        f"{STATE_FILE.name if STATE_FILE.exists() else 'built-in defaults'}):"
+    )
+    for name, bit in sorted(leds.bits.items(), key=lambda kv: kv[1]):
+        print(f"    {name:12s} → bit {bit}  (Q{'ABCDEFGH'[bit]})")
+    print()
+
     while True:
         cmd = input("  leds> ").strip().lower().split()
         if not cmd:
@@ -191,9 +255,31 @@ def run_led_named(leds):
         if cmd[0] in ("none", "off"):
             leds.all_off()
             continue
-        if len(cmd) == 2 and cmd[0] in leds.bits:
-            leds.set_named(cmd[0], cmd[1] == "on")
+        if cmd[0] in ("map", "reload"):
+            leds.bits = load_led_bits()
+            for name, bit in sorted(leds.bits.items(), key=lambda kv: kv[1]):
+                print(f"    {name:12s} → bit {bit}  (Q{'ABCDEFGH'[bit]})")
             continue
+        # Raw bit addressing: the one command that cannot be confused by a
+        # wrong or stale name mapping, so use it to establish ground truth.
+        if cmd[0] == "bit" and len(cmd) == 3 and cmd[1].isdigit():
+            bit = int(cmd[1])
+            if 0 <= bit <= 7:
+                leds.set_bit(bit, cmd[2] == "on")
+            else:
+                print("  bit must be 0-7")
+            continue
+        if len(cmd) == 2:
+            name = resolve_led_name(cmd[0])
+            if name and name in leds.bits:
+                leds.set_named(name, cmd[1] == "on")
+                continue
+            if name:
+                print(
+                    f"  {name!r} has no bit in the current mapping — "
+                    f"run the bit-walk, or use 'bit <n> on'"
+                )
+                continue
         print("  ?")
 
 
@@ -228,81 +314,136 @@ def run_led_patterns(leds):
 # ── Buttons ───────────────────────────────────────────────────────────────────
 
 
-def run_buttons(duration=30):
-    """Poll both buttons and measure contact bounce.
+def run_buttons(duration=30, pins=None):
+    """Show live pin levels, count presses, and measure contact bounce.
 
     Polling rather than gpiozero events: event dispatch latency would be
     indistinguishable from the bounce we are trying to measure.
+
+    The live level display matters more than the event counting. If a button
+    does nothing, "GPIO2 reads 1 even while pressed" is a diagnosis; "no
+    presses detected" is just a shrug.
     """
+    pins = pins or {"telegraphy": PIN_TELEGRAPHY, "ptt": PIN_PTT}
+
     print("\n── Button monitor ───────────────────────────────────────────────")
-    print(f"Press TELEGRAPHY (GPIO{PIN_TELEGRAPHY}) and PTT (GPIO{PIN_PTT}).")
-    print("Both are active-low. Ctrl-C to stop early.\n")
+    print("  " + "   ".join(f"{n}=GPIO{p}" for n, p in pins.items()))
+    print("  Both are active-low: the level should read 1 idle and 0 pressed.")
+    print("  Ctrl-C to stop early.\n")
 
     try:
         from gpiozero import DigitalInputDevice
     except ImportError:
-        print("  gpiozero not available — install python3-gpiozero.")
+        print("  gpiozero not available — sudo apt install python3-gpiozero")
         return False
 
-    # GPIO2 has an external 1.8k pull-up on the Pi; GPIO23 needs the internal one.
     try:
-        inputs = {
-            "telegraphy": DigitalInputDevice(PIN_TELEGRAPHY, pull_up=True),
-            "ptt": DigitalInputDevice(PIN_PTT, pull_up=True),
-        }
+        inputs = {name: DigitalInputDevice(pin, pull_up=True) for name, pin in pins.items()}
     except Exception as e:
         print(f"  Could not open GPIO: {e}")
+        print("  On Bookworm gpiozero needs a pin factory: sudo apt install python3-lgpio")
         return False
 
+    factory = type(next(iter(inputs.values())).pin_factory).__name__
+    print(f"  pin factory: {factory}\n")
+
+    # gpiozero inverts for pull_up=True: .value is 1 when the pin is LOW, i.e.
+    # when the button is pressed. The raw electrical level is the complement.
+    def level(dev):
+        return 0 if dev.value else 1
+
+    # A level is accepted once it has held for ACCEPT_MS. This must stay small:
+    # the HAT's own RC already debounces, and anything larger starts swallowing
+    # genuine short taps. An earlier version gated *printing* on 80 ms of quiet,
+    # which silently lost the release of any press shorter than that.
+    accept_s = ACCEPT_MS / 1000
+
     stats = {
-        name: {"presses": 0, "transitions": 0, "bounce_ms": [], "last": dev.value}
+        name: {
+            "presses": 0,
+            "raw": 0,
+            "accepted": 0,
+            "durations": [],
+            "stable": level(dev),
+            "last_raw": level(dev),
+            "changed_at": 0.0,
+            "pressed_at": None,
+        }
         for name, dev in inputs.items()
     }
-    pending = dict.fromkeys(inputs)
 
     deadline = time.monotonic() + duration
+    next_redraw = 0.0
     try:
         while time.monotonic() < deadline:
             now = time.monotonic()
             for name, dev in inputs.items():
-                v = dev.value
+                raw = level(dev)
                 st = stats[name]
-                if v != st["last"]:
-                    st["last"] = v
-                    st["transitions"] += 1
-                    if pending[name] is None:
-                        pending[name] = now
-                        if v == 0:
-                            st["presses"] += 1
-                            print(f"  {name:12s} PRESSED")
-                        else:
-                            print(f"  {name:12s} released")
-                elif pending[name] is not None and now - pending[name] > 0.08:
-                    # Settled: everything inside this window was bounce.
-                    st["bounce_ms"].append((now - pending[name]) * 1000)
-                    pending[name] = None
-            time.sleep(0.0002)
-    except KeyboardInterrupt:
-        print()
 
-    print("\n  Results:")
-    ok = False
+                if raw != st["last_raw"]:
+                    st["last_raw"] = raw
+                    st["raw"] += 1
+                    st["changed_at"] = now
+
+                if raw != st["stable"] and now - st["changed_at"] >= accept_s:
+                    st["stable"] = raw
+                    st["accepted"] += 1
+                    if raw == 0:
+                        st["presses"] += 1
+                        st["pressed_at"] = now
+                        print(f"\n  {name:12s} PRESSED")
+                    else:
+                        if st["pressed_at"] is not None:
+                            held = (now - st["pressed_at"]) * 1000
+                            st["durations"].append(held)
+                            print(f"\n  {name:12s} released  (held {held:.0f} ms)")
+                        else:
+                            print(f"\n  {name:12s} released")
+
+            if now >= next_redraw:
+                next_redraw = now + 0.1
+                live = "  ".join(
+                    f"{name}=GPIO{pins[name]}:{stats[name]['stable']}" for name in inputs
+                )
+                remaining = int(deadline - now)
+                sys.stdout.write(f"\r  levels  {live}   ({remaining}s left) ")
+                sys.stdout.flush()
+            time.sleep(0.0005)
+    except KeyboardInterrupt:
+        pass
+
+    print("\n\n  Results:")
+    ok = True
     for name, st in stats.items():
         if st["presses"] == 0:
-            print(f"    {name:12s} no presses detected")
+            ok = False
+            stuck = "high (1)" if st["stable"] == 1 else "low (0)"
+            print(f"    {name:12s} NO presses detected — level stayed {stuck}")
+            if pins[name] in (2, 3):
+                print(f"                 GPIO{pins[name]} carries a FIXED 1.8k pull-up to")
+                print("                 3V3 on the Pi. A button behind series")
+                print("                 resistance cannot pull it below the logic")
+                print("                 threshold — measure the pin while pressed.")
             continue
-        ok = True
-        extra = st["transitions"] - 2 * st["presses"]
-        worst = max(st["bounce_ms"]) if st["bounce_ms"] else 0.0
+
+        bounce = max(0, st["raw"] - st["accepted"])
+        shortest = min(st["durations"]) if st["durations"] else 0.0
+        longest = max(st["durations"]) if st["durations"] else 0.0
         print(
             f"    {name:12s} {st['presses']} press(es), "
-            f"{st['transitions']} transitions "
-            f"({'clean' if extra <= 0 else f'{extra} extra = bounce'}), "
-            f"worst settle {worst:.1f} ms"
+            f"{st['raw']} raw / {st['accepted']} accepted edges "
+            f"({'clean' if bounce == 0 else f'{bounce} bounce edge(s)'})"
         )
+        if st["durations"]:
+            print(f"                 held: {shortest:.0f}-{longest:.0f} ms")
+        if len(st["durations"]) < st["presses"]:
+            missed = st["presses"] - len(st["durations"])
+            print(f"                 {missed} press(es) with no matching release")
 
-    print("\n  Debounce guidance: set the daemon's debounce above the worst")
-    print("  settle time. Defaults are 20 ms (dedicated PTT) / 50 ms (shared).")
+    print(f"\n  Acceptance window: {ACCEPT_MS} ms. Any press shorter than that")
+    print("  is invisible, so keep the daemon's debounce small — the HAT's RC")
+    print("  does the real work.")
 
     for dev in inputs.values():
         dev.close()
@@ -349,6 +490,57 @@ def find_mixer(card):
     return None
 
 
+def find_capture_mixer(card):
+    """Return (control, has_autogain) for the card's capture path."""
+    try:
+        out = subprocess.run(
+            ["amixer", "-c", str(card), "scontrols"], capture_output=True, text=True
+        ).stdout
+    except FileNotFoundError:
+        return None, False
+    names = re.findall(r"Simple mixer control '([^']+)'", out)
+    autogain = any("auto gain" in n.lower() for n in names)
+    for candidate in CAPTURE_CANDIDATES:
+        if candidate in names:
+            return candidate, autogain
+    for name in names:
+        probe = subprocess.run(
+            ["amixer", "-c", str(card), "sget", name], capture_output=True, text=True
+        ).stdout
+        if "Capture" in probe and "%" in probe:
+            return name, autogain
+    return None, autogain
+
+
+def set_capture_volume(card, control, pct):
+    pct = max(0, min(100, int(pct)))
+    r = subprocess.run(
+        ["amixer", "-M", "-q", "-c", str(card), "sset", control, f"{pct}%", "cap"],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode == 0
+
+
+def set_autogain(card, on):
+    """Cheap USB codecs often expose an AGC switch, which helps a weak mic."""
+    try:
+        out = subprocess.run(
+            ["amixer", "-c", str(card), "scontrols"], capture_output=True, text=True
+        ).stdout
+    except FileNotFoundError:
+        return False
+    for name in re.findall(r"Simple mixer control '([^']+)'", out):
+        if "auto gain" in name.lower():
+            r = subprocess.run(
+                ["amixer", "-q", "-c", str(card), "sset", name, "on" if on else "off"],
+                capture_output=True,
+                text=True,
+            )
+            return r.returncode == 0
+    return False
+
+
 def get_mixer_volume(card, control):
     """Current volume as a percentage on ALSA's mapped (perceptual) scale."""
     out = subprocess.run(
@@ -384,6 +576,64 @@ def write_tone(path, freq=880, seconds=2.0, rate=8000, volume=0.5):
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(frames.tobytes())
+
+
+def read_samples(path):
+    try:
+        with wave.open(str(path), "rb") as w:
+            frames = w.readframes(w.getnframes())
+            params = w.getparams()
+    except Exception:
+        return array.array("h"), None
+    samples = array.array("h")
+    samples.frombytes(frames[: len(frames) // 2 * 2])
+    return samples, params
+
+
+def rms_level(path):
+    """RMS, which is what loudness actually follows — unlike peak."""
+    samples, _ = read_samples(path)
+    if not samples:
+        return 0.0
+    total = sum(float(s) * s for s in samples)
+    return math.sqrt(total / len(samples)) / 32767
+
+
+def crest_db(path):
+    """Peak-to-RMS in dB. ~3 dB for a sine, 14-20 dB for speech.
+
+    This single number explains why a test tone is comfortably loud while
+    speech at the same peak level is inaudible: the tone carries ten-plus dB
+    more average power for the same headroom.
+    """
+    peak, rms = peak_level(path), rms_level(path)
+    if rms <= 0 or peak <= 0:
+        return 0.0
+    return 20 * math.log10(peak / rms)
+
+
+def apply_gain(src, dst, gain):
+    """Multiply and hard-clip. Returns the fraction of samples clipped.
+
+    Hard clipping is not a compromise here, it is the intended effect: it is
+    how a cheap handheld radio gets usable loudness out of a weak amplifier,
+    and it is what makes speech carry. Quality is explicitly not the goal.
+    """
+    samples, params = read_samples(src)
+    if not samples or params is None:
+        return 0.0
+    clipped = 0
+    for i, s in enumerate(samples):
+        v = int(s * gain)
+        if v > 32767:
+            v, clipped = 32767, clipped + 1
+        elif v < -32768:
+            v, clipped = -32768, clipped + 1
+        samples[i] = v
+    with wave.open(str(dst), "wb") as w:
+        w.setparams(params)
+        w.writeframes(samples.tobytes())
+    return clipped / len(samples)
 
 
 def peak_level(path):
@@ -443,6 +693,142 @@ def run_volume_sweep(card_idx, control, dev):
     return safe
 
 
+def level_bar(level, width=40):
+    """Render a peak level with the healthy window marked, so the number means something."""
+    bar = ["-"] * width
+    lo, hi = int(CAPTURE_TARGET_MIN * width), int(CAPTURE_TARGET_MAX * width)
+    filled = min(width, int(level * width))
+    for i in range(filled):
+        bar[i] = "#"
+    for i in (lo, hi):
+        if 0 <= i < width and bar[i] == "-":
+            bar[i] = "|"
+    verdict = (
+        "SILENT"
+        if level < 0.01
+        else "weak"
+        if level < CAPTURE_TARGET_MIN
+        else "CLIPPING"
+        if level > 0.99
+        else "hot"
+        if level > CAPTURE_TARGET_MAX
+        else "good"
+    )
+    return f"peak {level * 100:5.1f}%  [{''.join(bar)}]  {verdict}"
+
+
+def run_gain_sweep(dev, rec):
+    """Play a recording back at increasing digital gain, hard-clipped.
+
+    Separate from the mixer sweep on purpose: the mixer is already at its
+    useful limit, and what is missing is average level, not peak.
+    """
+    print("\n── Voice gain ───────────────────────────────────────────────────")
+    print(
+        f"  Source: peak {peak_level(rec) * 100:.0f}%, "
+        f"RMS {rms_level(rec) * 100:.1f}%, crest {crest_db(rec):.0f} dB"
+    )
+    print("  A tone sits near 3 dB of crest; speech is 14-20 dB, which is why")
+    print("  the tone is loud and your voice is not. Gain plus clipping trades")
+    print("  that headroom for loudness, exactly as a handheld radio does.\n")
+
+    boosted = Path("/tmp/bipbox_gain.wav")
+    best = 1.0
+    for gain in GAIN_SWEEP:
+        clipped = apply_gain(rec, boosted, gain)
+        print(
+            f"  x{gain:<4g} ({20 * math.log10(gain):+.0f} dB)  "
+            f"clipped {clipped * 100:5.1f}% of samples …",
+            end=" ",
+            flush=True,
+        )
+        subprocess.run(["aplay", "-q", "-D", dev, str(boosted)], capture_output=True)
+        answer = input("good? [y/N/q] ").strip().lower()
+        if answer in ("y", "yes"):
+            best = gain
+        elif answer in ("q", "quit"):
+            break
+    boosted.unlink(missing_ok=True)
+
+    print(f"\n  Chosen voice gain: x{best:g} ({20 * math.log10(best):+.0f} dB)")
+    if input("  Save it? [y/N] ").strip().lower() == "y":
+        save_state(playback_gain=best)
+        print(f"  Saved to {STATE_FILE.name}")
+    return best
+
+
+def run_capture_sweep(card_idx, control, dev, has_agc=False):
+    """Find a capture gain that puts normal speech in the healthy window.
+
+    The speakermic is a low-output element into a cheap codec, so the card's
+    default capture level is usually far too low to be usable.
+    """
+    print("\n── Mic gain sweep ───────────────────────────────────────────────")
+    print("At each step you get 3 s to speak normally, at the distance you")
+    print("would actually hold the mic. Aim for the window marked with |.\n")
+
+    if (
+        has_agc
+        and input("  An automatic gain control exists. Enable it? [y/N] ").strip().lower() == "y"
+    ):
+        set_autogain(card_idx, True)
+        print("  AGC on.\n")
+
+    rec = Path("/tmp/bipbox_cap.wav")
+    results = {}
+    for pct in CAPTURE_SWEEP:
+        set_capture_volume(card_idx, control, pct)
+        print(f"  {pct:3d}% — speak now…", end=" ", flush=True)
+        subprocess.run(
+            [
+                "arecord",
+                "-q",
+                "-D",
+                dev,
+                "-f",
+                "S16_LE",
+                "-r",
+                "8000",
+                "-c",
+                "1",
+                "-d",
+                "3",
+                str(rec),
+            ],
+            capture_output=True,
+        )
+        level = peak_level(rec)
+        results[pct] = level
+        print(level_bar(level))
+    rec.unlink(missing_ok=True)
+
+    usable = {p: v for p, v in results.items() if CAPTURE_TARGET_MIN <= v <= CAPTURE_TARGET_MAX}
+    if usable:
+        # Highest gain still inside the window, for the best margin over noise.
+        best = max(usable)
+        print(f"\n  Best: {best}% (peak {usable[best] * 100:.0f}%)")
+    else:
+        best = max(results, key=lambda p: results[p])
+        if results[best] < CAPTURE_TARGET_MIN:
+            print(
+                f"\n  Nothing reached the window — loudest was {best}% at "
+                f"{results[best] * 100:.0f}%."
+            )
+            print("  The mic is under-driven at the hardware level. Check the mic")
+            print("  wiring for your variant, and whether bias is reaching the")
+            print("  element (wiring 2 needs the 1uF coupling cap on Ring 2).")
+            if has_agc:
+                print("  Enabling the AGC is also worth a try.")
+        else:
+            print(f"\n  Everything clipped; quietest usable is below {min(results)}%.")
+
+    set_capture_volume(card_idx, control, best)
+    if input(f"  Save {best}% as the capture default? [y/N] ").strip().lower() == "y":
+        save_state(capture_pct=best, capture_control=control)
+        print(f"  Saved to {STATE_FILE.name}")
+    return best
+
+
 def run_audio(volume_pct=None):
     print("\n── Audio ────────────────────────────────────────────────────────")
     card = find_usb_card()
@@ -460,12 +846,22 @@ def run_audio(volume_pct=None):
 
     if control:
         set_mixer_volume(idx, control, volume_pct)
-        print(
-            f"  Mixer '{control}' set to {volume_pct}% (was {original}%) — speaker-safe default\n"
-        )
+        print(f"  Mixer '{control}' set to {volume_pct}% (was {original}%) — speaker-safe default")
     else:
         print("  ! No playback mixer control found; the card will play at")
-        print("    whatever level it is already set to. Start quietly.\n")
+        print("    whatever level it is already set to. Start quietly.")
+
+    cap_control, has_agc = find_capture_mixer(idx)
+    capture_pct = load_state().get("capture_pct", DEFAULT_CAPTURE_PCT)
+    if cap_control:
+        set_capture_volume(idx, cap_control, capture_pct)
+        print(
+            f"  Capture '{cap_control}' set to {capture_pct}%"
+            + (" (AGC available)" if has_agc else "")
+        )
+    else:
+        print("  ! No capture mixer control found — the mic runs at the card's default.")
+    print()
 
     tone = Path("/tmp/bipbox_tone.wav")
     rec = Path("/tmp/bipbox_rec.wav")
@@ -492,19 +888,34 @@ def run_audio(volume_pct=None):
         return False
 
     level = peak_level(rec)
-    bar = "#" * int(level * 40)
-    print(f"      peak level: {level * 100:5.1f}%  |{bar:<40}|")
+    print(f"      {level_bar(level)}")
     if level < 0.01:
         print("      Silent — check the mic wiring (Ring 1 or Ring 2 per variant).")
+    elif level < CAPTURE_TARGET_MIN:
+        print("      Weak — run the mic gain sweep below.")
     elif level > 0.99:
-        print("      Clipping — consider the 47R resistor in parallel.")
+        print("      Clipping — lower the capture gain.")
 
     print("      Playing it back…")
     subprocess.run(["aplay", "-q", "-D", dev, str(rec)], capture_output=True)
     back = input("      Did you hear your voice? [y/N] ").strip().lower() == "y"
 
-    for f in (tone, rec):
-        f.unlink(missing_ok=True)
+    tone.unlink(missing_ok=True)
+
+    if cap_control and (
+        level < CAPTURE_TARGET_MIN
+        or input("\n  Run the mic gain sweep? [y/N] ").strip().lower() == "y"
+    ):
+        run_capture_sweep(idx, cap_control, dev, has_agc)
+
+    # Kept until here on purpose: the gain sweep needs the recording, and this
+    # is the moment the user has just heard that it is too quiet.
+    if (
+        rec.exists()
+        and input("\n  Voice too quiet? Run the voice gain sweep? [y/N] ").strip().lower() == "y"
+    ):
+        run_gain_sweep(dev, rec)
+    rec.unlink(missing_ok=True)
 
     if (
         control
@@ -515,7 +926,7 @@ def run_audio(volume_pct=None):
         set_mixer_volume(idx, control, original)
         print(f"  Mixer restored to {original}%.")
 
-    return heard and back and level >= 0.01
+    return heard and back and level >= CAPTURE_TARGET_MIN
 
 
 # ── Printer ───────────────────────────────────────────────────────────────────
@@ -572,6 +983,42 @@ def run_printer():
     return input("  Did it print correctly? [y/N] ").strip().lower() == "y"
 
 
+def gain_sweep_entry():
+    card = find_usb_card()
+    if not card:
+        print("\n  No ALSA card found.")
+        return False
+    idx, _ = card
+    dev = f"plughw:{idx},0"
+    rec = Path("/tmp/bipbox_voice.wav")
+    print("\n  Recording 3 s — speak normally…")
+    r = subprocess.run(
+        ["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", "8000", "-c", "1", "-d", "3", str(rec)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(f"  arecord failed: {r.stderr.strip()[:200]}")
+        return False
+    try:
+        return bool(run_gain_sweep(dev, rec))
+    finally:
+        rec.unlink(missing_ok=True)
+
+
+def capture_sweep_entry():
+    card = find_usb_card()
+    if not card:
+        print("\n  No ALSA card found.")
+        return False
+    idx, _ = card
+    control, has_agc = find_capture_mixer(idx)
+    if not control:
+        print("\n  No capture mixer control on this card.")
+        return False
+    return bool(run_capture_sweep(idx, control, f"plughw:{idx},0", has_agc))
+
+
 def volume_sweep_entry():
     card = find_usb_card()
     if not card:
@@ -613,6 +1060,8 @@ def menu(leds):
         ("Button monitor + bounce measurement", run_buttons),
         ("Audio (tone out, record, playback)", run_audio),
         ("Volume sweep (find the safe ceiling)", volume_sweep_entry),
+        ("Mic gain sweep", capture_sweep_entry),
+        ("Voice gain sweep (louder, clipped)", gain_sweep_entry),
         ("Printer test ticket", run_printer),
     ]
     while True:
@@ -679,6 +1128,15 @@ def main():
         help=f"playback volume for the audio test "
         f"(default {DEFAULT_VOLUME_PCT}%%, or the saved ceiling)",
     )
+    ap.add_argument("--mic-sweep", action="store_true", help="find a usable capture gain")
+    ap.add_argument("--gain-sweep", action="store_true", help="find a voice gain (louder, clipped)")
+    ap.add_argument(
+        "--pin",
+        type=int,
+        action="append",
+        metavar="N",
+        help="monitor this GPIO instead of the defaults (repeatable)",
+    )
     ap.add_argument("--printer", action="store_true")
     args = ap.parse_args()
 
@@ -689,9 +1147,14 @@ def main():
         print(f"  ! {p}")
 
     if args.buttons:
-        return 0 if run_buttons() else 1
+        pins = {f"gpio{p}": p for p in args.pin} if args.pin else None
+        return 0 if run_buttons(pins=pins) else 1
     if args.volume_sweep:
         return 0 if volume_sweep_entry() else 1
+    if args.mic_sweep:
+        return 0 if capture_sweep_entry() else 1
+    if args.gain_sweep:
+        return 0 if gain_sweep_entry() else 1
     if args.audio:
         return 0 if run_audio(args.volume) else 1
     if args.printer:

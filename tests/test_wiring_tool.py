@@ -101,23 +101,176 @@ def test_led_bits_prefer_a_discovered_mapping(tool, tmp_path, monkeypatch):
 
 def test_volume_defaults_are_conservative(tool):
     """A freshly flashed box must never arrive loud (architecture.md §6.3.1)."""
-    assert tool.DEFAULT_VOLUME_PCT == 40
+    assert tool.DEFAULT_VOLUME_PCT == 70  # measured ceiling, 2026-10-07
+    assert tool.DEFAULT_VOLUME_PCT <= tool.VOLUME_WARN_PCT
     assert tool.VOLUME_SWEEP[0] <= 10
     assert max(tool.VOLUME_SWEEP) > tool.VOLUME_WARN_PCT
     assert sorted(tool.VOLUME_SWEEP) == tool.VOLUME_SWEEP
 
 
+def test_telex_is_not_swallowed_by_telegraphy(tool):
+    """Regression: 'telex' and 'telegraphy' collide on a 4-character prefix.
+
+    The original matcher accepted `answer.startswith(name[:4])`, so typing
+    "telex" matched "telegraphy", filed telex's bit under telegraphy, and left
+    telex permanently unmapped — with no error shown.
+    """
+    assert tool.resolve_led_name("telex") == "telex"
+    assert tool.resolve_led_name("telegraphy") == "telegraphy"
+
+
+def test_resolve_led_name_accepts_unambiguous_prefixes(tool):
+    assert tool.resolve_led_name("v") == "voip"
+    assert tool.resolve_led_name("w") == "wifi"
+    assert tool.resolve_led_name("teleg") == "telegraphy"
+
+
+def test_resolve_led_name_rejects_ambiguity_and_nonsense(tool):
+    assert tool.resolve_led_name("tele") is None  # telegraphy vs telex
+    assert tool.resolve_led_name("t") is None
+    assert tool.resolve_led_name("banana") is None
+
+
+def test_resolve_led_name_is_case_and_space_insensitive(tool):
+    assert tool.resolve_led_name("  TeLeX  ") == "telex"
+
+
+def test_capture_window_is_sane(tool):
+    assert 0 < tool.CAPTURE_TARGET_MIN < tool.CAPTURE_TARGET_MAX < 1.0
+    assert sorted(tool.CAPTURE_SWEEP) == tool.CAPTURE_SWEEP
+    assert tool.DEFAULT_CAPTURE_PCT in tool.CAPTURE_SWEEP
+
+
+def _write(path, samples, rate=8000):
+    import array
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(array.array("h", samples).tobytes())
+
+
+def test_sine_crest_factor_is_about_three_db(tool, tmp_path):
+    """The reference point for the whole loudness argument (architecture.md §6.3.3)."""
+    path = tmp_path / "tone.wav"
+    tool.write_tone(path, seconds=0.5, volume=0.9)
+    assert tool.crest_db(path) == pytest.approx(3.0, abs=0.5)
+
+
+def test_bursty_signal_has_a_much_higher_crest_than_a_sine(tool, tmp_path):
+    """Why a tone is loud and speech is not, at the same peak level."""
+    rate = 8000
+    bursty = [
+        int(30000 * (1.0 if (i // 400) % 5 == 0 else 0.03) * math.sin(2 * math.pi * 300 * i / rate))
+        for i in range(rate)
+    ]
+    path = tmp_path / "bursty.wav"
+    _write(path, bursty, rate)
+
+    tone = tmp_path / "tone.wav"
+    tool.write_tone(tone, seconds=0.5, volume=0.9)
+
+    assert tool.crest_db(path) > tool.crest_db(tone) + 5
+    assert tool.peak_level(path) == pytest.approx(tool.peak_level(tone), abs=0.05)
+    assert tool.rms_level(path) < tool.rms_level(tone)
+
+
+def test_apply_gain_raises_rms_and_reports_clipping(tool, tmp_path):
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(8000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    before = tool.rms_level(src)
+    clipped = tool.apply_gain(src, dst, 2)
+
+    assert clipped == 0.0  # 8000 x2 still fits in int16
+    assert tool.rms_level(dst) == pytest.approx(2 * before, rel=0.02)
+
+
+def test_apply_gain_hard_clips_instead_of_wrapping(tool, tmp_path):
+    """Integer overflow would wrap to the opposite rail and sound catastrophic."""
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(30000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    clipped = tool.apply_gain(src, dst, 8)
+
+    assert clipped > 0.5
+    samples, _ = tool.read_samples(dst)
+    assert max(samples) == 32767
+    assert min(samples) >= -32768
+    assert tool.peak_level(dst) == pytest.approx(1.0, abs=0.001)
+
+
+def test_gain_of_one_is_a_no_op(tool, tmp_path):
+    rate = 8000
+    src = tmp_path / "src.wav"
+    _write(src, [int(10000 * math.sin(2 * math.pi * 300 * i / rate)) for i in range(rate)], rate)
+    dst = tmp_path / "dst.wav"
+
+    assert tool.apply_gain(src, dst, 1) == 0.0
+    assert tool.read_samples(src)[0] == tool.read_samples(dst)[0]
+
+
+def test_gain_sweep_starts_at_unity(tool):
+    assert tool.GAIN_SWEEP[0] == 1
+    assert sorted(tool.GAIN_SWEEP) == tool.GAIN_SWEEP
+
+
+def test_rms_and_crest_of_a_missing_file_do_not_raise(tool, tmp_path):
+    assert tool.rms_level(tmp_path / "nope.wav") == 0.0
+    assert tool.crest_db(tmp_path / "nope.wav") == 0.0
+
+
+def test_level_bar_verdicts(tool):
+    assert "SILENT" in tool.level_bar(0.0)
+    assert "weak" in tool.level_bar(0.10)
+    assert "good" in tool.level_bar(0.50)
+    assert "hot" in tool.level_bar(0.92)
+    assert "CLIPPING" in tool.level_bar(1.0)
+
+
 def test_blink_patterns_match_the_specified_timings(tool):
-    assert tool.PATTERNS["slow"] == [(500, 500)]
-    assert tool.PATTERNS["fast"] == [(100, 100)]
-    assert tool.PATTERNS["heartbeat"] == [(80, 1920)]
+    """Timings as judged on real LEDs: the originals read too brief and too quick."""
+    assert tool.PATTERNS["slow"] == [(550, 550)]
+    assert tool.PATTERNS["fast"] == [(175, 175)]
+    assert tool.PATTERNS["heartbeat"] == [(200, 2800)]
     # ". . _" repeating, with no trailing pause (Q30).
-    assert tool.PATTERNS["ap"] == [(150, 150), (150, 150), (450, 150)]
+    assert tool.PATTERNS["ap"] == [(200, 200), (200, 200), (500, 200)]
 
 
-def test_heartbeat_period_is_two_seconds(tool):
+def test_heartbeat_is_a_brief_blink_on_a_three_second_cycle(tool):
     on, off = tool.PATTERNS["heartbeat"][0]
-    assert on + off == 2000
+    assert on + off == 3000
+    # The gap must dominate, or it stops reading as a heartbeat and becomes
+    # just another slow blink.
+    assert off > 10 * on
+
+
+def test_fast_stays_distinguishable_from_slow(tool):
+    """They appear on the same lamp at different times, so the ratio must hold.
+
+    Fast has been lengthened twice; this guards the point where another
+    adjustment would make the two patterns hard to tell apart.
+    """
+    fast_period = sum(tool.PATTERNS["fast"][0])
+    slow_period = sum(tool.PATTERNS["slow"][0])
+    assert slow_period >= 2.5 * fast_period
+
+
+def test_every_timing_is_a_multiple_of_the_led_tick(tool):
+    """The LED controller ticks at 25 ms (architecture.md §3.4).
+
+    Timings that are not multiples of the tick get quantised, so a pattern
+    would not run at the duration written here.
+    """
+    for name, phases in tool.PATTERNS.items():
+        for on, off in phases:
+            assert on % 25 == 0, f"{name}: on={on}"
+            assert off % 25 == 0, f"{name}: off={off}"
 
 
 def test_tone_frequency_is_recoverable(tool, tmp_path):
