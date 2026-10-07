@@ -158,11 +158,18 @@ Timings (Q30, with the AP pause removed as you asked):
 | Pattern | Definition |
 |---|---|
 | `off` / `on` | steady |
-| `slow` | 500 ms on / 500 ms off |
-| `fast` | 100 ms on / 100 ms off |
-| `heartbeat` | 80 ms on / 1920 ms off |
-| `ap` | 150 on, 150 off, 150 on, 150 off, 450 on, 150 off — repeating, no pause |
+| `slow` | 550 ms on / 550 ms off |
+| `fast` | 125 ms on / 125 ms off |
+| `heartbeat` | 130 ms on / 1970 ms off |
+| `ap` | 200 on, 200 off, 200 on, 200 off, 500 on, 200 off — repeating, no pause |
 | `flash` | 50 ms per event, held visible ≥ 150 ms |
+
+**Revised 2026-10-07 after judging them on the real LEDs**, which is why the
+pattern preview exists: `fast` gained 25 ms on each phase and every other
+pattern gained 50 ms on each phase. The originals read as too brief through
+the panel. Note this puts the heartbeat period at 2.1 s rather than exactly
+2 s — imperceptible for a "blink every couple of seconds", but say so if you
+want 1920 ms kept as the gap.
 
 | LED | off | slow | fast | on | heartbeat |
 |---|---|---|---|---|---|
@@ -500,9 +507,14 @@ Rules:
   change, so nothing else drifts it. ALSA state is also saved across reboots.
 - The mapped (perceptual) ALSA scale is used — `amixer -M` — so a percentage
   behaves like a percentage on a slider rather than like a register value.
-- Raising `volume_max_pct` shows a **warning** in the local console naming the
-  risk to the speaker, and it is deliberately not exposed in the ordinary volume
-  UI. Above 70% the warning is stronger.
+- **Both the output volume and the mic gain are user-facing** in the local
+  console, side by side, because in practice neither has a setting that works
+  untouched: the output is quiet (see §6.3.2) and the two speakermic variants
+  need different capture gains. The mic gain control carries a **live level
+  meter** — a gain slider without one is guesswork, and the same healthy
+  window the bring-up sweep uses (25–85% peak) is drawn on it.
+- Raising `volume_max_pct` shows a **warning** in the local console, and it sits
+  in an advanced section rather than beside the everyday volume control.
 - Boxes ship at `volume_max_pct = 70` (the measured ceiling) with the user
   volume well below it, so a freshly flashed card can never arrive loud.
 - If the sweep concludes that even ~20% is too loud, that is a **hardware**
@@ -512,6 +524,44 @@ Rules:
 
 The same ceiling applies to the test tone and the printer-less startup beep —
 there is no code path to the speaker that bypasses it.
+
+### 6.3.2 Why playback is quiet, and why it is a hardware fix
+
+**Found 2026-10-07: playback is too quiet even at the 70% ceiling, and the
+cause is resistive, not software.** From the netlist, the output chain is:
+
+```
+sound card speaker out (J3.3) ──[R11 22Ω]── J4.4 (TRRS tip) ── speaker
+                                     └──[R12 47Ω]── GND
+```
+
+R11 in series with a low-impedance speaker is a voltage divider, and it throws
+away most of the signal:
+
+| Speaker | With R12 fitted | R12 removed | R12 removed, R11 = 10 Ω | R11 = 4.7 Ω |
+|---|---|---|---|---|
+| 8 Ω | −12.5 dB | −11.5 dB | −7.0 dB | −4.0 dB |
+| 16 Ω | −9.1 dB | −7.5 dB | −4.2 dB | −2.2 dB |
+| 32 Ω | −6.7 dB | −4.5 dB | −2.4 dB | −1.3 dB |
+
+Two conclusions:
+
+1. **R12 is barely the problem.** As a shunt to ground it costs only 1–2 dB.
+   Removing it is nearly free but nearly pointless.
+2. **R11 = 22 Ω is the problem.** Dropping it to 10 Ω buys about 4.5 dB and
+   still leaves the codec a sane ≈ 18 Ω load; 4.7 Ω buys ~8 dB. Shorting it
+   entirely asks a headphone-class output to drive 8 Ω directly, which will
+   distort before it gets loud.
+
+**This also corrects the rationale in §6.3.1.** The faint buzz at 80% is the
+codec running out of clean output, not the speaker struggling — with 12 dB of
+resistive attenuation in front of it the speaker receives roughly 25 mW, far
+inside its rating. So `volume_max_pct` is an **amplifier-headroom** limit, not
+speaker protection. The ceiling model stands; the reason for it was wrong.
+
+Before changing R11, **measure the speakermic's speaker** (DC resistance
+across tip and sleeve, ≈ 0.8 × nominal impedance), since the table above swings
+by 6 dB across plausible values.
 
 ### 6.4 Browser media — selectable transport mode
 

@@ -73,10 +73,10 @@ CAPTURE_TARGET_MAX = 0.85
 
 # Blink patterns from architecture.md §3.4, as (on_ms, off_ms) sequences.
 PATTERNS = {
-    "slow": [(500, 500)],
-    "fast": [(100, 100)],
-    "heartbeat": [(80, 1920)],
-    "ap": [(150, 150), (150, 150), (450, 150)],
+    "slow": [(550, 550)],
+    "fast": [(125, 125)],
+    "heartbeat": [(130, 1970)],
+    "ap": [(200, 200), (200, 200), (500, 200)],
 }
 
 

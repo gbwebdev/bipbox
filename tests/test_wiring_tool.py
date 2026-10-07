@@ -150,16 +150,25 @@ def test_level_bar_verdicts(tool):
 
 
 def test_blink_patterns_match_the_specified_timings(tool):
-    assert tool.PATTERNS["slow"] == [(500, 500)]
-    assert tool.PATTERNS["fast"] == [(100, 100)]
-    assert tool.PATTERNS["heartbeat"] == [(80, 1920)]
+    """Timings as judged on real LEDs, 2026-10-07: the originals read too brief."""
+    assert tool.PATTERNS["slow"] == [(550, 550)]
+    assert tool.PATTERNS["fast"] == [(125, 125)]
+    assert tool.PATTERNS["heartbeat"] == [(130, 1970)]
     # ". . _" repeating, with no trailing pause (Q30).
-    assert tool.PATTERNS["ap"] == [(150, 150), (150, 150), (450, 150)]
+    assert tool.PATTERNS["ap"] == [(200, 200), (200, 200), (500, 200)]
 
 
-def test_heartbeat_period_is_two_seconds(tool):
+def test_heartbeat_blink_is_brief_against_a_long_gap(tool):
+    """'A quick blink every 2 seconds' — the gap must dominate, or it reads as slow blink."""
     on, off = tool.PATTERNS["heartbeat"][0]
-    assert on + off == 2000
+    assert off > 10 * on
+    assert 2000 <= on + off <= 2200
+
+
+def test_fast_is_clearly_faster_than_slow(tool):
+    fast_on = tool.PATTERNS["fast"][0][0]
+    slow_on = tool.PATTERNS["slow"][0][0]
+    assert slow_on > 3 * fast_on
 
 
 def test_tone_frequency_is_recoverable(tool, tmp_path):
