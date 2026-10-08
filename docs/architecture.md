@@ -205,12 +205,55 @@ Two boxes, two speakermics, two PCB build variants:
 | A | Baofeng BF-T1/T8/U9/UV-3R+ | Wiring 1 | Dedicated ring → switch to GND |
 | B | Yaesu/Vertex VX-3R, FT-60R… | Wiring 2 | Mic bias → 10 kΩ → 2N7000 gate → drain |
 
-Both present as **active-low on GPIO23**, so the software path is likely
-identical: internal pull-up, falling edge = pressed. Wiring 2 has an RC on the
-gate (10 kΩ + 100 nF ≈ 1 ms) so its edges are slower, and the MOSFET may chatter
-at the thresholds. The config therefore carries
-`ptt_wiring: dedicated | shared` and a per-variant debounce value (default 20 ms
-dedicated, 50 ms shared), rather than assuming they're interchangeable.
+**They are NOT the same polarity — corrected 2026-10-08 after variant 2 failed
+on the bench.** The config carries `ptt_wiring: dedicated | shared`, and the
+polarity follows from it (`Calibration.ptt_active_low`):
+
+| Variant | Idle | Pressed |
+|---|---|---|
+| `dedicated` | pin pulled high by the pull-up | switch grounds it → **LOW** |
+| `shared` | mic-line bias keeps the transistor conducting → pin **LOW** | bias collapses, transistor opens → pin **HIGH** |
+
+So variant 2 is **active-high**, the opposite of variant 1 and of the
+telegraphy key. Wiring 2 also has an RC on the gate (10 kΩ + 100 nF ≈ 1 ms), so
+its edges are slower and it gets a wider debounce window by default (50 ms,
+against 20 ms for the dedicated variant).
+
+#### Variant 2 (shared mic/PTT) does not work as designed
+
+Found 2026-10-08: on the shared-wiring board, **neither PTT nor the microphone
+worked**, and both failures have one cause.
+
+```
+TRRS ring 2 ──┬── C11 1µF ── sound card mic tip
+              └── R10 10k ──┬── Q2 2N7000 gate ── drain → GPIO23
+                            └── C3 100nF ── GND
+```
+
+**C11 blocks DC, and DC is what both functions depend on.** The electret
+element needs a bias voltage to produce any signal, and the sound card supplies
+one — but the series capacitor stops it reaching the element. The 2N7000's gate
+is fed from the same line, so with no DC there it never reaches V_GS(th) either.
+No bias, therefore no audio *and* no PTT.
+
+Three further problems in that circuit, in order of importance:
+
+1. **Bypass C11** so the card's own bias feeds the line. Audio then flows and
+   the line's DC level (biased when idle, collapsed when pressed) drives the
+   gate. One component removed rather than a bias network added.
+2. **The 2N7000 is the wrong part.** Its V_GS(th) is 0.8–3.0 V and a biased mic
+   line sits around 1–2 V: inside the band where it works on one sample and not
+   another. An **NPN (BC547/2N3904)** switches at ~0.6 V and reuses R10 as its
+   base resistor.
+3. **The gate has no pull-down.** With no speakermic plugged in the line is
+   open and the gate floats, leaving GPIO23 undefined. A **100 kΩ gate-to-
+   ground** gives a defined "not pressed" when unplugged.
+
+One thing to measure before trusting the topology at all: whether PTT takes the
+line to *exactly* 0 V or to an intermediate voltage. A dead short also shorts
+the microphone, making audio and PTT mutually exclusive on a shared line; a
+series resistor in the switch lets both coexist. Yaesu speakermics usually do
+the latter, but it is a property of the speakermic, not of the board.
 
 ### 3.4 LED state machine
 
@@ -232,7 +275,19 @@ Timings (Q30, with the AP pause removed as you asked):
 | `fast` | 175 ms on / 175 ms off |
 | `heartbeat` | 200 ms on / 2800 ms off — a **3 s** cycle |
 | `ap` | 200 on, 200 off, 200 on, 200 off, 500 on, 200 off — repeating, no pause |
-| `flash` | 50 ms per event, held visible ≥ 150 ms |
+| `flash` | activity: `fast`, held **350 ms**, and it **starts dark** |
+
+**The flash needed two corrections, both found by implementing it.** Activity
+is shown on a lamp that is usually *steady-on* (telex connected, then
+receiving), so:
+
+- It must last **at least one full `fast` cycle** (350 ms). A shorter flash can
+  land entirely inside the pattern's lit phase and produce no visible change
+  whatsoever — invisible exactly when it matters.
+- It must **open with the dark phase**. On a lit lamp only a gap registers, so
+  the flash carries its own phase origin rather than following the global one.
+  Repeated flashes extend it without restarting that phase, so sustained
+  activity reads as continuous blinking instead of a stutter.
 
 **Tuned on the real LEDs over two passes**, which is why the pattern preview
 exists — every one of these read too brief or too quick on paper:
