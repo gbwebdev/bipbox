@@ -91,6 +91,60 @@ audio stream — irrelevant.
 `config.txt` additions: `dtparam=spi=on`, `dtparam=act_led_gpio=26`,
 `dtoverlay=gpio-shutdown,gpio_pin=3`.
 
+### 3.1a Assembly hazard: the 40-pin header has no keying
+
+**A Pi Zero W was destroyed this way on 2026-10-08.** The HAT was fitted with
+its even-numbered row sitting on the Pi's odd-numbered row — one row across,
+with the HAT's first row hanging off the end entirely. Nothing about the
+connector prevents it.
+
+| HAT pin | lands on Pi pin | consequence |
+|---|---|---|
+| 2 — **+5 V** | 1 — **3V3** | **5 V forced onto the Pi's 3.3 V rail** |
+| 4 — **+5 V** | 3 — GPIO2 | 5 V onto a 3.3 V-max GPIO |
+| 6 — GND | 5 — GPIO3 | GPIO3 shorted to ground |
+
+5 V on the 3V3 rail is the classic fatal Pi mistake: that rail feeds the SoC
+I/O, the SD interface and the BCM43438 WiFi module. The symptom was a board
+that blinked its ACT LED, never joined WiFi (the radio was already gone), and
+grew too hot to touch over two or three minutes. It did not survive.
+
+**Design fix for the next PCB revision: a shrouded 2×20 header**, which makes
+the misalignment physically impossible. It is a trivial BOM change and this
+board is meant to be opened for servicing, so the mistake will recur otherwise.
+
+**Until then, the assembly procedure is:**
+
+1. Test-fit on the dead Pi first — it is now the alignment dummy.
+2. Confirm pin 1 of the HAT sits on pin 1 of the Pi, by eye, every time.
+3. With the HAT powered and **no Pi fitted**, confirm header pins 1 and 17
+   (3V3) read ≈ 0 V. The HAT only consumes 3.3 V; it never sources it, so any
+   voltage there means a bridge that will kill the next Pi too.
+4. Keep a finger on the SoC for the first thirty seconds after power-up.
+
+Also worth knowing after any such event: GPIO2 is the telegraphy button. A Pi
+can survive the 3V3 insult and still have that single pin damaged, so test it
+explicitly with `wiring_test.py --buttons` rather than assuming.
+
+### 3.1b Keep the fleet uniform: Pi Zero W, not Zero 2 W
+
+Both boxes use the **Pi Zero W (ARMv6)**, and replacements should match.
+
+The Zero 2 W is pin-compatible, runs the same armhf image, and is roughly four
+times the CPU — tempting after an ARMv6-driven design. Two reasons not to:
+
+- **Both boxes run the same software, so the weakest box sets the constraints.**
+  While box A is a Zero W, a faster box B buys nothing and the G.711/plain-RTP
+  design (`voip-options.md`) stands either way.
+- **UUGear document a real risk with the Zero4U hub**: the Zero 2 W's stronger
+  WiFi radiation can interfere with USB devices on some ports and make them
+  unstable. This box runs the *sound card* and the *printer* over that hub, and
+  unstable isochronous USB is indistinguishable from bad audio — it would
+  poison the phase 0b measurements.
+
+A Zero 2 W is an acceptable fallback if Zero W stock runs out, but it is a
+knowing trade, and audio dropouts become the first thing to suspect.
+
 ### 3.2 Driving the 74HC(T)595 over hardware SPI
 
 Using CE1 as the latch is neat and it works: spidev holds CS low for the
@@ -954,6 +1008,38 @@ on success, `wlan0` station mode; on failure, AP `bipbox-XXXX` on 192.168.4.1
 with the console open for setup. mDNS via avahi as `<hostname>.local`.
 
 Telex's hotspot path is rewritten, not ported — it was dead code (F4.1).
+
+### 9.3a Storage: assume the card will be abused
+
+**Two microSD cards failed during bring-up**, one of them taking an evening to
+diagnose because a dead card is indistinguishable from dead hardware until you
+read it on another machine. Boxes that children power-cycle will keep doing
+this, so the design assumes it.
+
+**The real fix is a read-only root filesystem** — Raspberry Pi OS provides it
+via `raspi-config` → Performance Options → Overlay File System. Normal
+operation then never writes to the card, so an unclean shutdown *cannot*
+corrupt it, and journald goes to RAM.
+
+That has one consequence to design for rather than discover: **the calibration
+(§3.6), the device config and the print spool all need somewhere writable.**
+The overlay would silently discard them at reboot. So the layout is overlay
+root plus a **small dedicated rw partition** mounted for `/etc/bipbox` and the
+spool — not the overlay.
+
+Card guidance, from the failures:
+
+- **Buy a known brand from a first-party seller.** The card that failed was
+  no-name and may never have had its claimed capacity. Counterfeits fail
+  exactly this way: fine at first, then silently stop storing sectors.
+- **Verify before building on it**: `f3probe --destructive --time-ops /dev/sdX`.
+- **32 GB.** Smaller cards are often old stock with poorer controllers and less
+  spare area for wear levelling.
+- **Write endurance is not the constraint.** This box writes tens of megabytes
+  a day; any genuine card survives that for decades. Endurance-branded cards
+  are reasonable but are not what prevents the failure seen here.
+- **Keep a spare card flashed with the golden image.** It turns a dead card
+  from an evening into a sixty-second swap.
 
 ### 9.4 Image build (Q34)
 
