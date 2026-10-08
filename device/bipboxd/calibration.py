@@ -71,6 +71,20 @@ class Calibration:
             raise CalibrationError(f"ptt_wiring={self.ptt_wiring!r} is not dedicated or shared")
 
     @property
+    def ptt_active_low(self) -> bool:
+        """Whether PTT grounds the GPIO when pressed. It depends on the wiring.
+
+        `dedicated`: a switch on its own TRRS ring pulls the pin to ground, so
+        pressed is LOW — the same as the telegraphy key.
+
+        `shared`: the mic and PTT share one line. A transistor conducts while
+        that line carries its idle bias, holding the pin LOW; pressing PTT
+        collapses the bias, the transistor turns off, and the internal pull-up
+        takes the pin HIGH. So pressed is HIGH — inverted (architecture.md §3.3).
+        """
+        return self.ptt_wiring == "dedicated"
+
+    @property
     def mask(self) -> int:
         """Every mapped bit, for an all-on test."""
         return sum(1 << bit for bit in self.led_bits.values())

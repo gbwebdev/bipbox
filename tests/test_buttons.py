@@ -166,6 +166,50 @@ def test_per_button_debounce_comes_from_the_calibration():
     assert watcher.buttons["telegraphy"].debounce_ms == 20
 
 
+def test_dedicated_ptt_wiring_is_active_low():
+    assert Calibration(ptt_wiring="dedicated").ptt_active_low is True
+
+
+def test_shared_ptt_wiring_is_active_high():
+    """The mic line's idle bias holds the pin low; pressing PTT releases it."""
+    assert Calibration(ptt_wiring="shared").ptt_active_low is False
+
+
+def test_shared_wiring_detects_a_press_as_the_pin_going_high():
+    clock = Clock()
+    hardware = FakeHardware(clock=clock)
+    cal = Calibration(ptt_wiring="shared", ptt_debounce_ms=20)
+    watcher = ButtonWatcher.from_calibration(hardware, cal, clock=clock)
+
+    # Idle for this variant is the pin held LOW by the conducting transistor.
+    hardware.press(PIN_PTT)
+    settle(watcher, clock, 100)
+    assert not watcher.is_pressed("ptt")
+
+    # Pressing PTT collapses the bias and the pin floats high.
+    hardware.release(PIN_PTT)
+    events = settle(watcher, clock, 100)
+
+    assert [(n, k) for n, k, _ in events] == [("ptt", "press")]
+    assert watcher.is_pressed("ptt")
+
+
+def test_telegraphy_stays_active_low_whatever_the_ptt_variant():
+    """Only the PTT polarity depends on the harness; the key never does."""
+    clock = Clock()
+    hardware = FakeHardware(clock=clock)
+    watcher = ButtonWatcher.from_calibration(
+        hardware, Calibration(ptt_wiring="shared"), clock=clock
+    )
+
+    assert watcher.buttons["telegraphy"].active_low is True
+    assert watcher.buttons["ptt"].active_low is False
+
+    hardware.press(PIN_TELEGRAPHY)
+    events = settle(watcher, clock, 100)
+    assert [(n, k) for n, k, _ in events] == [("telegraphy", "press")]
+
+
 def test_a_wider_debounce_rejects_a_press_a_narrower_one_accepts():
     clock = Clock()
     hardware = FakeHardware(clock=clock)

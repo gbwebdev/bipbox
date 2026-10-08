@@ -26,6 +26,12 @@ POLL_MS = 2
 class ButtonState:
     pin: int
     debounce_ms: int
+    # Which electrical level means "pressed". The telegraphy key and the
+    # dedicated-PTT wiring ground the pin, so they are active-low. The shared
+    # mic/PTT wiring is the opposite: the transistor conducts while the mic
+    # line carries its idle bias, holding the pin LOW, and pressing PTT
+    # collapses that bias so the pin floats HIGH (architecture.md §3.3).
+    active_low: bool = True
     level: int = 1
     raw_level: int = 1
     changed_at: float = 0.0
@@ -33,8 +39,12 @@ class ButtonState:
     presses: int = 0
 
     @property
+    def pressed_level(self) -> int:
+        return 0 if self.active_low else 1
+
+    @property
     def is_pressed(self) -> bool:
-        return self.level == 0
+        return self.level == self.pressed_level
 
 
 class ButtonWatcher:
@@ -61,8 +71,12 @@ class ButtonWatcher:
         return cls(
             hardware,
             {
-                "telegraphy": ButtonState(PIN_TELEGRAPHY, calibration.telegraphy_debounce_ms),
-                "ptt": ButtonState(PIN_PTT, calibration.ptt_debounce_ms),
+                "telegraphy": ButtonState(
+                    PIN_TELEGRAPHY, calibration.telegraphy_debounce_ms, active_low=True
+                ),
+                "ptt": ButtonState(
+                    PIN_PTT, calibration.ptt_debounce_ms, active_low=calibration.ptt_active_low
+                ),
             },
             clock=clock,
         )
@@ -90,7 +104,7 @@ class ButtonWatcher:
                 continue
 
             state.level = raw
-            if raw == 0:
+            if raw == state.pressed_level:
                 state.presses += 1
                 state.pressed_at = now
                 events.append((name, "press", 0.0))
