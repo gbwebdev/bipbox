@@ -1,0 +1,24 @@
+name: bipbox
+
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    # Bound to localhost: Cloudflare is the only front door for the control
+    # plane (architecture.md §1), so nothing here is published directly.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/srv/data
+    environment:
+      BIPBOX_ENVIRONMENT: production
+      BIPBOX_DATABASE_URL: sqlite+aiosqlite:///./data/bipbox.db
+      BIPBOX_IMAGE_DIR: ./data/images
+      # Generated per process if unset, which logs every admin out and
+      # invalidates every device credential on restart. Set both.
+      BIPBOX_SESSION_SECRET: ${BIPBOX_SESSION_SECRET:?set it: openssl rand -base64 32}
+      BIPBOX_DEVICE_SECRET_PEPPER: ${BIPBOX_DEVICE_SECRET_PEPPER:?set it: openssl rand -base64 32}
+      # Read-only token for /health/detail. Empty disables it.
+      BIPBOX_MONITOR_TOKEN: ${BIPBOX_MONITOR_TOKEN:-}
+      BIPBOX_BROWSER_VOIP_MODE: ${BIPBOX_BROWSER_VOIP_MODE:-wireguard}
+      BIPBOX_WG_SUBNET: ${BIPBOX_WG_SUBNET:-100.64.42.0/24}
