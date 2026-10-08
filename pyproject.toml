@@ -11,4 +11,20 @@ testpaths = ["tests"]
 addopts = "-q"
 # Makes the bipboxd package importable without installing it; the device code
 # is deployed as a directory on the Pi, not as a wheel.
-pythonpath = ["device"]
+pythonpath = ["device", "server"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI expresses dependency injection as a call in an argument default, so
+# B008 fires on every route that uses it. Allow the framework's own helpers
+# rather than scattering noqa comments through the routers.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Cookie",
+    "fastapi.Security",
+]

@@ -13,6 +13,9 @@
 *-backups/
 ~*.lck
 fp-info-cache
+# Editor local-history plugin; it is itself a git repo, so `git add -A` would
+# otherwise commit it as a gitlink.
+CAD/KiCAD/.history/
 
 # Python
 __pycache__/
